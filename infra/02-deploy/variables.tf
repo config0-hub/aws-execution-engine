@@ -12,3 +12,9 @@ variable "aws_region" {
   description = "AWS region"
   type        = string
 }
+
+variable "jwt_secret_ssm_path" {
+  description = "SSM path for JWT shared secret (cross-account credential transport)"
+  type        = string
+  default     = ""
+}

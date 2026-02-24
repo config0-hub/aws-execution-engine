@@ -81,7 +81,7 @@ def _setup_events_dir(trace_id: str) -> str:
     Subprocesses write JSON event files here. After command execution,
     the main process reads them and transfers to DynamoDB.
     """
-    events_dir = f"/var/tmp/share/{trace_id}/events"
+    events_dir = f"/tmp/share/{trace_id}/events"
     os.makedirs(events_dir, exist_ok=True)
     os.environ["AWS_EXE_SYS_EVENTS_DIR"] = events_dir
     return events_dir
@@ -260,3 +260,14 @@ def run(s3_location: str, internal_bucket: str = "") -> str:
         logger.warning("No CALLBACK_URL found, skipping callback")
 
     return status
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    s3_loc = os.environ.get("S3_LOCATION", "")
+    bucket = os.environ.get("INTERNAL_BUCKET", "")
+    if not s3_loc:
+        logger.error("Missing S3_LOCATION env var")
+        exit(1)
+    result = run(s3_loc, bucket)
+    exit(0 if result == "succeeded" else 1)

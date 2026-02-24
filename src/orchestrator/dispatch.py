@@ -5,9 +5,17 @@ import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from decimal import Decimal
 from typing import Dict, List
 
 import boto3
+
+
+def _json_default(obj):
+    """JSON encoder default for DynamoDB Decimal types."""
+    if isinstance(obj, Decimal):
+        return int(obj) if obj == int(obj) else float(obj)
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 from src.common import dynamodb
 from src.common.models import RUNNING
@@ -30,7 +38,7 @@ def _dispatch_lambda(order: dict, run_id: str, internal_bucket: str) -> str:
     resp = lambda_client.invoke(
         FunctionName=function_name,
         InvocationType="Event",  # async
-        Payload=json.dumps(payload).encode(),
+        Payload=json.dumps(payload, default=_json_default).encode(),
     )
     return resp.get("ResponseMetadata", {}).get("RequestId", "")
 
@@ -62,14 +70,14 @@ def _dispatch_ssm(order: dict, run_id: str, internal_bucket: str) -> str:
     document_name = order.get("ssm_document_name") or os.environ["AWS_EXE_SYS_SSM_DOCUMENT"]
 
     parameters = {
-        "Commands": [json.dumps(order.get("cmds", []))],
+        "Commands": [json.dumps(order.get("cmds", []), default=_json_default)],
         "CallbackUrl": [order.get("callback_url", "")],
         "Timeout": [str(order.get("timeout", 300))],
     }
 
     env_dict = order.get("env_dict", {})
     if env_dict:
-        parameters["EnvVars"] = [json.dumps(env_dict)]
+        parameters["EnvVars"] = [json.dumps(env_dict, default=_json_default)]
 
     s3_location = order.get("s3_location", "")
     if s3_location:
@@ -118,7 +126,7 @@ def _start_watchdog(
     resp = sfn_client.start_execution(
         stateMachineArn=state_machine_arn,
         name=f"{run_id}-{order_num}",
-        input=json.dumps(sfn_input),
+        input=json.dumps(sfn_input, default=_json_default),
     )
     return resp.get("executionArn", "")
 

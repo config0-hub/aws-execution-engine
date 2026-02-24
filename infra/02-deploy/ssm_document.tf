@@ -1,5 +1,5 @@
 resource "aws_ssm_document" "run_commands" {
-  name            = "${local.prefix}-run-commands"
+  name            = replace("${local.prefix}-run-commands", "-", "_")
   document_type   = "Command"
   document_format = "YAML"
 

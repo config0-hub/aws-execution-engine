@@ -62,6 +62,7 @@ def _process_order(
         order_num=order_num,
         trace_id=trace_id,
         flow_id=flow_id,
+        cmds=order.cmds,
         env_vars=order.env_vars or {},
         ssm_values=ssm_values,
         secret_values=secret_values,

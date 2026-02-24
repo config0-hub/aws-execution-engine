@@ -86,7 +86,7 @@ class TestSetupEventsDir:
             trace_id = "test-trace-456"
             events_dir = _setup_events_dir(trace_id)
             assert os.environ["AWS_EXE_SYS_EVENTS_DIR"] == events_dir
-            assert events_dir == f"/var/tmp/share/{trace_id}/events"
+            assert events_dir == f"/tmp/share/{trace_id}/events"
 
     def test_idempotent(self):
         trace_id = "test-trace-789"

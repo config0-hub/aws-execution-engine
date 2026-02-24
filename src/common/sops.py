@@ -54,7 +54,8 @@ def store_sops_key_ssm(
     Returns the SSM parameter path.
     """
     ssm = boto3.client("ssm")
-    path = f"/aws-exe-sys/sops-keys/{run_id}/{order_num}"
+    prefix = os.environ.get("AWS_EXE_SYS_SSM_PREFIX", "exe-sys")
+    path = f"/{prefix}/sops-keys/{run_id}/{order_num}"
 
     expiration = (
         datetime.now(timezone.utc) + timedelta(hours=ttl_hours)

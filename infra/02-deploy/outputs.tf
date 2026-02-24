@@ -82,6 +82,16 @@ output "s3_bucket_names" {
   }
 }
 
+output "init_job_function_name" {
+  description = "init_job Lambda function name"
+  value       = aws_lambda_function.init_job.function_name
+}
+
+output "init_job_function_arn" {
+  description = "init_job Lambda function ARN"
+  value       = aws_lambda_function.init_job.arn
+}
+
 output "step_function_arn" {
   description = "Watchdog Step Function ARN"
   value       = aws_sfn_state_machine.watchdog.arn

@@ -37,6 +37,17 @@ def fetch_secret_values(paths: List[str], region: Optional[str] = None) -> Dict[
     return result
 
 
+def _strip_location_prefix(location: str) -> str:
+    """Strip provider prefix from credential location.
+
+    Supports formats like 'aws:::ssm:/path/to/param' -> '/path/to/param'.
+    Plain SSM paths are returned as-is.
+    """
+    if location.startswith("aws:::ssm:"):
+        return location[len("aws:::ssm:"):]
+    return location
+
+
 def resolve_git_credentials(
     token_location: str = "",
     ssh_key_location: Optional[str] = None,
@@ -54,12 +65,12 @@ def resolve_git_credentials(
     ssh_key_path = None
 
     if token_location:
-        vals = fetch_ssm_values([token_location], region=region)
+        vals = fetch_ssm_values([_strip_location_prefix(token_location)], region=region)
         if vals:
             token = list(vals.values())[0]
 
     if ssh_key_location:
-        vals = fetch_ssm_values([ssh_key_location], region=region)
+        vals = fetch_ssm_values([_strip_location_prefix(ssh_key_location)], region=region)
         if vals:
             key_content = list(vals.values())[0]
             ssh_key_path = tempfile.mktemp(suffix=".key", prefix="aws-exe-sys-ssh-")
@@ -115,10 +126,21 @@ def clone_repo(
         )
 
     if commit_hash:
-        subprocess.run(
-            ["git", "checkout", commit_hash],
-            check=True, capture_output=True, text=True, cwd=work_dir,
-        )
+        try:
+            subprocess.run(
+                ["git", "checkout", commit_hash],
+                check=True, capture_output=True, text=True, cwd=work_dir,
+            )
+        except subprocess.CalledProcessError:
+            # Commit not in shallow clone — fetch it directly
+            subprocess.run(
+                ["git", "fetch", "--depth", "1", "origin", commit_hash],
+                check=True, capture_output=True, text=True, cwd=work_dir,
+            )
+            subprocess.run(
+                ["git", "checkout", commit_hash],
+                check=True, capture_output=True, text=True, cwd=work_dir,
+            )
 
     return work_dir
 

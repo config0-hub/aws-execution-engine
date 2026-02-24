@@ -5,6 +5,7 @@ and credential sources. It merges everything into a flat dict, then hands
 it off to sops.repackage_order which stays generic.
 """
 
+import json
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -26,6 +27,9 @@ class OrderBundler:
     order_num: str = ""
     trace_id: str = ""
     flow_id: str = ""
+
+    # Commands
+    cmds: List[str] = field(default_factory=list)
 
     # Credential sources
     env_vars: Dict[str, str] = field(default_factory=dict)
@@ -49,6 +53,10 @@ class OrderBundler:
         # Credentials from SSM / Secrets Manager
         merged.update(self.ssm_values)
         merged.update(self.secret_values)
+
+        # Commands (JSON-serialized list)
+        if self.cmds:
+            merged["CMDS"] = json.dumps(self.cmds)
 
         # Callback URL
         if self.callback_url:

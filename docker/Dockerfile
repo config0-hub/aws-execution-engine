@@ -1,21 +1,20 @@
 FROM public.ecr.aws/lambda/python:3.14
 
 # Install system dependencies
-RUN dnf install -y jq curl git tar gzip && dnf clean all
+RUN dnf install -y jq git tar gzip && dnf clean all
 
-# Install sops
-RUN curl -Lo /usr/local/bin/sops \
-    https://github.com/getsops/sops/releases/download/v3.9.4/sops-v3.9.4.linux.amd64 && \
-    chmod +x /usr/local/bin/sops
+# Install sops (pre-downloaded to avoid GitHub connectivity issues in Docker)
+COPY docker/sops /usr/local/bin/sops
+RUN chmod +x /usr/local/bin/sops
 
-# Install age
-RUN curl -Lo /tmp/age.tar.gz \
-    https://github.com/FiloSottile/age/releases/download/v1.2.1/age-v1.2.1-linux-amd64.tar.gz && \
-    tar -xzf /tmp/age.tar.gz -C /tmp && \
-    mv /tmp/age/age /usr/local/bin/age && \
-    mv /tmp/age/age-keygen /usr/local/bin/age-keygen && \
-    chmod +x /usr/local/bin/age /usr/local/bin/age-keygen && \
-    rm -rf /tmp/age /tmp/age.tar.gz
+# Install age (pre-downloaded to avoid GitHub connectivity issues in Docker)
+COPY docker/age /usr/local/bin/age
+COPY docker/age-keygen /usr/local/bin/age-keygen
+RUN chmod +x /usr/local/bin/age /usr/local/bin/age-keygen
+
+# Install OpenTofu (pre-downloaded)
+COPY docker/tofu /usr/local/bin/tofu
+RUN chmod +x /usr/local/bin/tofu
 
 # Install Python dependencies
 COPY requirements.txt ./

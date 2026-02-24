@@ -60,6 +60,16 @@ class TestBuildEnv:
         env = bundler.build_env()
         assert "CALLBACK_URL" not in env
 
+    def test_cmds_serialized_as_json(self):
+        bundler = OrderBundler(cmds=["echo hello", "terraform plan"])
+        env = bundler.build_env()
+        assert env["CMDS"] == '["echo hello", "terraform plan"]'
+
+    def test_cmds_omitted_when_empty(self):
+        bundler = OrderBundler()
+        env = bundler.build_env()
+        assert "CMDS" not in env
+
     def test_introspection_fields_default_to_empty(self):
         bundler = OrderBundler()
         env = bundler.build_env()

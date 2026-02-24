@@ -7,15 +7,16 @@ resource "aws_sfn_state_machine" "watchdog" {
     StartAt = "CheckResult"
     States = {
       CheckResult = {
-        Type     = "Task"
-        Resource = aws_lambda_function.watchdog_check.arn
-        Next     = "IsDone"
+        Type       = "Task"
+        Resource   = aws_lambda_function.watchdog_check.arn
+        ResultPath = "$.taskResult"
+        Next       = "IsDone"
       }
       IsDone = {
         Type = "Choice"
         Choices = [
           {
-            Variable      = "$.done"
+            Variable      = "$.taskResult.done"
             BooleanEquals = true
             Next          = "Succeed"
           }

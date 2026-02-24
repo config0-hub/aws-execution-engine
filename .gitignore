@@ -213,3 +213,10 @@ __marimo__/
 *.tfstate.backup
 *.tfplan
 backend.tf
+terraform.tfvars
+
+# Docker pre-downloaded binaries
+docker/sops
+docker/age
+docker/age-keygen
+docker/tofu

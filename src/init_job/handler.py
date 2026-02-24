@@ -65,6 +65,7 @@ def _normalize_event(event: Dict[str, Any]) -> Dict[str, Any]:
 
 def process_job_and_insert_orders(
     job_parameters_b64: str,
+    credentials_token: str = "",
     trace_id: str = "",
     run_id: str = "",
     done_endpt: str = "",
@@ -75,6 +76,38 @@ def process_job_and_insert_orders(
 
     # Decode job parameters
     job = Job.from_b64(job_parameters_b64)
+
+    # --- JWT credential injection ---
+    if credentials_token:
+        jwt_secret_ssm_path = os.environ.get("JWT_SECRET_SSM_PATH", "")
+        if not jwt_secret_ssm_path:
+            return {"status": "error", "error": "JWT_SECRET_SSM_PATH not configured"}
+
+        import boto3
+        from src.common.jwt_creds import verify_credentials_token
+
+        ssm = boto3.client("ssm")
+        resp = ssm.get_parameter(Name=jwt_secret_ssm_path, WithDecryption=True)
+        jwt_secret = resp["Parameter"]["Value"]
+
+        claims = verify_credentials_token(credentials_token, jwt_secret)
+
+        injected_creds = {
+            k: claims[k]
+            for k in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN")
+            if k in claims
+        }
+
+        for order in job.orders:
+            if order.env_vars is None:
+                order.env_vars = {}
+            order.env_vars.update(injected_creds)
+
+        logger.info("Injected credentials from JWT", extra={
+            "target_account_id": claims.get("target_account_id"),
+            "assumed_role_arn": claims.get("assumed_role_arn"),
+        })
+    # --- End JWT credential injection ---
 
     # Generate IDs
     if not trace_id:
@@ -168,8 +201,11 @@ def handler(event: Dict[str, Any], context: Any = None) -> dict:
             result = {"status": "error", "error": "Missing job_parameters_b64"}
             return _apigw_response(400, result) if is_apigw else result
 
+        credentials_token = payload.get("credentials_token", "")
+
         result = process_job_and_insert_orders(
             job_parameters_b64=job_parameters_b64,
+            credentials_token=credentials_token,
             trace_id=payload.get("trace_id", ""),
             run_id=payload.get("run_id", ""),
             done_endpt=payload.get("done_endpt", ""),

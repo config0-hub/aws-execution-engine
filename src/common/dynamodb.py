@@ -158,7 +158,7 @@ def put_event(
         extra_fields: Metadata fields (flow_id, run_id) -- stored at top level.
     """
     table = _get_table("AWS_EXE_SYS_ORDER_EVENTS_TABLE", dynamodb_resource)
-    epoch = str(int(time.time()))
+    epoch = int(time.time())
     sk = f"{order_name}:{epoch}"
     item = {
         "trace_id": trace_id,
@@ -167,6 +167,7 @@ def put_event(
         "epoch": epoch,
         "event_type": event_type,
         "status": status,
+        "ttl": epoch + 900,  # 15 min for testing; change to 172800 (2 days) for prod
     }
     if extra_fields:
         item.update(extra_fields)

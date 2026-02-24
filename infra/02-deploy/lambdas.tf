@@ -23,7 +23,9 @@ resource "aws_lambda_function" "init_job" {
   }
 
   environment {
-    variables = local.lambda_env
+    variables = merge(local.lambda_env, {
+      JWT_SECRET_SSM_PATH = var.jwt_secret_ssm_path
+    })
   }
 }
 

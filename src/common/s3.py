@@ -5,12 +5,13 @@ import os
 from typing import Optional
 
 import boto3
+from botocore.config import Config
 
 
 def _get_client(s3_client=None):
-    """Get an S3 client."""
+    """Get an S3 client with v4 signatures for regional bucket support."""
     if s3_client is None:
-        s3_client = boto3.client("s3")
+        s3_client = boto3.client("s3", config=Config(signature_version="s3v4"))
     return s3_client
 
 
