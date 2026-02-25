@@ -62,7 +62,7 @@ resource "aws_iam_role_policy" "init_job" {
       {
         Effect   = "Allow"
         Action   = ["ssm:PutParameter"]
-        Resource = "arn:aws:ssm:${local.region}:${local.account_id}:parameter/${local.prefix}/sops-keys/*"
+        Resource = "arn:aws:ssm:${local.region}:${local.account_id}:parameter/exe-sys/sops-keys/*"
       },
       {
         Effect   = "Allow"
@@ -146,7 +146,7 @@ resource "aws_iam_role_policy" "orchestrator" {
       {
         Effect   = "Allow"
         Action   = ["ssm:DeleteParameter"]
-        Resource = "arn:aws:ssm:${local.region}:${local.account_id}:parameter/${local.prefix}/sops-keys/*"
+        Resource = "arn:aws:ssm:${local.region}:${local.account_id}:parameter/exe-sys/sops-keys/*"
       },
     ]
   })
@@ -218,7 +218,7 @@ resource "aws_iam_role_policy" "worker" {
       {
         Effect   = "Allow"
         Action   = ["ssm:GetParameter"]
-        Resource = "arn:aws:ssm:${local.region}:${local.account_id}:parameter/${local.prefix}/sops-keys/*"
+        Resource = "arn:aws:ssm:${local.region}:${local.account_id}:parameter/exe-sys/sops-keys/*"
       },
     ]
   })
@@ -290,7 +290,7 @@ resource "aws_iam_role_policy" "codebuild" {
       {
         Effect   = "Allow"
         Action   = ["ssm:GetParameter"]
-        Resource = "arn:aws:ssm:${local.region}:${local.account_id}:parameter/${local.prefix}/sops-keys/*"
+        Resource = "arn:aws:ssm:${local.region}:${local.account_id}:parameter/exe-sys/sops-keys/*"
       },
     ]
   })

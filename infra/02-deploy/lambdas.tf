@@ -5,6 +5,7 @@ locals {
     AWS_EXE_SYS_LOCKS_TABLE        = aws_dynamodb_table.orchestrator_locks.name
     AWS_EXE_SYS_INTERNAL_BUCKET    = aws_s3_bucket.internal.id
     AWS_EXE_SYS_DONE_BUCKET        = aws_s3_bucket.done.id
+    AWS_EXE_SYS_SSM_PREFIX         = "exe-sys"
   }
 }
 

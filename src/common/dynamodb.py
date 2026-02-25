@@ -159,7 +159,7 @@ def put_event(
     """
     table = _get_table("AWS_EXE_SYS_ORDER_EVENTS_TABLE", dynamodb_resource)
     epoch = int(time.time())
-    sk = f"{order_name}:{epoch}"
+    sk = f"{order_name}:{epoch}:{event_type}"
     item = {
         "trace_id": trace_id,
         "sk": sk,
