@@ -1,0 +1,173 @@
+name: Tests
+on: [push, pull_request]
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build test image
+        run: docker build -f docker/Dockerfile.test -t aws-exe-sys-tests .
+
+      - name: Run common library tests
+        run: |
+          docker run --rm aws-exe-sys-tests \
+            tests/unit/test_models.py \
+            tests/unit/test_trace.py \
+            tests/unit/test_flow.py \
+            tests/unit/test_dynamodb.py \
+            tests/unit/test_s3.py \
+            tests/unit/test_sops.py \
+            tests/unit/test_vcs_github.py \
+            tests/unit/test_vcs_helper.py \
+            -v
+
+      - name: Run init_job tests
+        run: |
+          docker run --rm aws-exe-sys-tests \
+            tests/unit/test_validate.py \
+            tests/unit/test_repackage.py \
+            tests/unit/test_upload.py \
+            tests/unit/test_insert.py \
+            tests/unit/test_pr_comment.py \
+            tests/unit/test_handler.py \
+            -v
+
+      - name: Run orchestrator tests
+        run: |
+          docker run --rm aws-exe-sys-tests \
+            tests/unit/test_orchestrator_lock.py \
+            tests/unit/test_read_state.py \
+            tests/unit/test_evaluate.py \
+            tests/unit/test_dispatch.py \
+            tests/unit/test_finalize.py \
+            -v
+
+      - name: Run watchdog tests
+        run: |
+          docker run --rm aws-exe-sys-tests \
+            tests/unit/test_watchdog.py \
+            -v
+
+      - name: Run worker tests
+        run: |
+          docker run --rm aws-exe-sys-tests \
+            tests/unit/test_worker_run.py \
+            tests/unit/test_worker_callback.py \
+            tests/unit/test_bundler.py \
+            -v
+
+      - name: Run ssm_config tests
+        run: |
+          docker run --rm aws-exe-sys-tests \
+            tests/unit/test_ssm_config_handler.py \
+            tests/unit/test_ssm_config_models.py \
+            tests/unit/test_ssm_config_validate.py \
+            -v
+
+  terraform-validate:
+    needs: unit-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.5'
+
+      - name: Validate 00-bootstrap
+        run: |
+          cd infra/00-bootstrap
+          terraform init
+          terraform validate
+          terraform fmt -check
+
+      - name: Validate 01-ecr
+        run: |
+          cd infra/01-ecr
+          terraform init
+          terraform validate
+          terraform fmt -check
+
+      - name: Validate 02-deploy
+        run: |
+          cd infra/02-deploy
+          terraform init -backend=false
+          terraform validate
+          terraform fmt -check
+
+  script-tests:
+    needs: terraform-validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test generate_backend.sh
+        run: |
+          bash scripts/generate_backend.sh test-bucket ecr us-east-1
+          cat backend.tf
+          grep -q 'bucket = "test-bucket"' backend.tf
+          grep -q 'key    = "ecr/terraform.tfstate"' backend.tf
+          rm backend.tf
+
+      - name: Test generate_tfvars.sh
+        run: |
+          bash scripts/generate_tfvars.sh 123456.dkr.ecr.us-east-1.amazonaws.com/aws-exe-sys abc123 us-east-1
+          cat terraform.tfvars
+          grep -q 'image_tag' terraform.tfvars
+          grep -q 'ecr_repo' terraform.tfvars
+          rm terraform.tfvars
+
+      - name: Test generate_bucket_name.sh
+        run: |
+          BUCKET=$(bash scripts/generate_bucket_name.sh)
+          echo "Generated: $BUCKET"
+          [[ "$BUCKET" == aws-exe-sys-state-* ]]
+
+      - name: Test generate_bucket_name.sh with env override
+        run: |
+          AWS_EXE_SYS_STATE_BUCKET=my-custom-bucket BUCKET=$(bash scripts/generate_bucket_name.sh)
+          [ "$BUCKET" = "my-custom-bucket" ]
+
+      - name: Validate deploy workflow syntax
+        run: |
+          pip install pyyaml
+          python -c "import yaml; yaml.safe_load(open('.github/workflows/deploy.yml'))"
+
+      - name: Validate test workflow syntax
+        run: |
+          python -c "import yaml; yaml.safe_load(open('.github/workflows/test.yml'))"
+
+  integration-tests:
+    needs: script-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build test image
+        run: docker build -f docker/Dockerfile.test -t aws-exe-sys-tests .
+
+      - name: Run init_job integration tests
+        run: |
+          docker run --rm aws-exe-sys-tests \
+            tests/integration/test_init_job.py -v
+
+      - name: Run orchestrator integration tests
+        run: |
+          docker run --rm aws-exe-sys-tests \
+            tests/integration/test_orchestrator.py -v
+
+      - name: Run full run integration tests
+        run: |
+          docker run --rm aws-exe-sys-tests \
+            tests/integration/test_full_run.py -v
+
+      - name: Run failure scenario integration tests
+        run: |
+          docker run --rm aws-exe-sys-tests \
+            tests/integration/test_failure_scenarios.py -v
+
+      - name: Run worker events integration tests
+        run: |
+          docker run --rm aws-exe-sys-tests \
+            tests/integration/test_worker_events.py -v

@@ -1,0 +1,3 @@
+pytest>=7.0.0
+moto[all]>=5.0.0
+responses>=0.25.0

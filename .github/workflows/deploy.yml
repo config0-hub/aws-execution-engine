@@ -1,0 +1,155 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      aws_region:
+        description: 'AWS Region'
+        required: true
+        default: 'us-east-1'
+      state_bucket_name:
+        description: 'S3 bucket for TF state (auto-generated if empty)'
+        required: false
+        default: ''
+
+env:
+  TF_VAR_aws_region: ${{ inputs.aws_region }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.5'
+          terraform_wrapper: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      # Step 1: Bootstrap state bucket
+      - name: Resolve bucket name
+        id: bucket
+        run: |
+          if [ -n "${{ inputs.state_bucket_name }}" ]; then
+            echo "name=${{ inputs.state_bucket_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "name=$(bash scripts/generate_bucket_name.sh)" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Bootstrap state bucket
+        run: |
+          cd infra/00-bootstrap
+          terraform init
+          terraform apply -auto-approve \
+            -var "state_bucket_name=${{ steps.bucket.outputs.name }}" \
+            -var "aws_region=${{ inputs.aws_region }}"
+
+      # Step 2: Create ECR
+      - name: Deploy ECR
+        run: |
+          cd infra/01-ecr
+          bash ../../scripts/generate_backend.sh \
+            "${{ steps.bucket.outputs.name }}" "ecr" "${{ inputs.aws_region }}"
+          terraform init
+          terraform apply -auto-approve \
+            -var "aws_region=${{ inputs.aws_region }}"
+
+      - name: Get ECR repo URL
+        id: ecr
+        run: |
+          cd infra/01-ecr
+          echo "url=$(terraform output -raw ecr_repo_url)" >> $GITHUB_OUTPUT
+
+      # Step 3: Build and push Docker image
+      - name: Login to ECR
+        run: |
+          aws ecr get-login-password --region ${{ inputs.aws_region }} | \
+            docker login --username AWS --password-stdin ${{ steps.ecr.outputs.url }}
+
+      - name: Build and push
+        run: |
+          docker build -f docker/Dockerfile -t ${{ steps.ecr.outputs.url }}:${{ github.sha }} -t ${{ steps.ecr.outputs.url }}:latest .
+          docker push ${{ steps.ecr.outputs.url }}:${{ github.sha }}
+          docker push ${{ steps.ecr.outputs.url }}:latest
+
+      # Step 4: Deploy system
+      - name: Deploy infrastructure
+        run: |
+          cd infra/02-deploy
+          bash ../../scripts/generate_backend.sh \
+            "${{ steps.bucket.outputs.name }}" "deploy" "${{ inputs.aws_region }}"
+          bash ../../scripts/generate_tfvars.sh \
+            "${{ steps.ecr.outputs.url }}" "${{ github.sha }}" "${{ inputs.aws_region }}"
+          terraform init
+          terraform apply -auto-approve
+
+      - name: Get deploy outputs
+        id: deploy
+        run: |
+          cd infra/02-deploy
+          echo "api_url=$(terraform output -raw api_gateway_url)" >> $GITHUB_OUTPUT
+          echo "orders_table=$(terraform output -json dynamodb_table_names | jq -r '.orders')" >> $GITHUB_OUTPUT
+          echo "order_events_table=$(terraform output -json dynamodb_table_names | jq -r '.order_events')" >> $GITHUB_OUTPUT
+          echo "locks_table=$(terraform output -json dynamodb_table_names | jq -r '.orchestrator_locks')" >> $GITHUB_OUTPUT
+          echo "internal_bucket=$(terraform output -json s3_bucket_names | jq -r '.internal')" >> $GITHUB_OUTPUT
+          echo "done_bucket=$(terraform output -json s3_bucket_names | jq -r '.done')" >> $GITHUB_OUTPUT
+
+      # Step 5: Smoke tests
+      - name: Run smoke tests
+        run: |
+          export API_GATEWAY_URL="${{ steps.deploy.outputs.api_url }}"
+          export AWS_REGION="${{ inputs.aws_region }}"
+          export ORDERS_TABLE="${{ steps.deploy.outputs.orders_table }}"
+          export ORDER_EVENTS_TABLE="${{ steps.deploy.outputs.order_events_table }}"
+          export LOCKS_TABLE="${{ steps.deploy.outputs.locks_table }}"
+          export INTERNAL_BUCKET="${{ steps.deploy.outputs.internal_bucket }}"
+          export DONE_BUCKET="${{ steps.deploy.outputs.done_bucket }}"
+          bash tests/smoke/test_deploy.sh
+
+      # Step 6: Archive for teardown
+      - name: Create teardown archive
+        run: |
+          mkdir -p /tmp/teardown/infra/01-ecr
+          mkdir -p /tmp/teardown/infra/02-deploy
+
+          cp infra/01-ecr/*.tf /tmp/teardown/infra/01-ecr/
+          cp infra/01-ecr/backend.tf /tmp/teardown/infra/01-ecr/ 2>/dev/null || true
+
+          cp infra/02-deploy/*.tf /tmp/teardown/infra/02-deploy/
+          cp infra/02-deploy/backend.tf /tmp/teardown/infra/02-deploy/ 2>/dev/null || true
+          cp infra/02-deploy/terraform.tfvars /tmp/teardown/infra/02-deploy/ 2>/dev/null || true
+
+          cat > /tmp/teardown/TEARDOWN.md << 'TDEOF'
+          # Teardown Instructions
+
+          1. cd infra/02-deploy && terraform init && terraform destroy -auto-approve
+          2. cd infra/01-ecr && terraform init && terraform destroy -auto-approve
+          3. Manually delete state bucket: aws s3 rb s3://${{ steps.bucket.outputs.name }} --force
+          TDEOF
+
+          cd /tmp/teardown
+          zip -r /tmp/aws-exe-sys-teardown-${{ github.sha }}.zip .
+
+      - name: Upload teardown archive
+        run: |
+          aws s3 cp /tmp/aws-exe-sys-teardown-${{ github.sha }}.zip \
+            s3://${{ steps.bucket.outputs.name }}/archive/aws-exe-sys-teardown-${{ github.sha }}.zip
+
+      - name: Summary
+        run: |
+          echo "## Deploy Complete" >> $GITHUB_STEP_SUMMARY
+          echo "- API Gateway: ${{ steps.deploy.outputs.api_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "- State Bucket: ${{ steps.bucket.outputs.name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Image Tag: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Teardown archive: s3://${{ steps.bucket.outputs.name }}/archive/aws-exe-sys-teardown-${{ github.sha }}.zip" >> $GITHUB_STEP_SUMMARY

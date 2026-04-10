@@ -1,0 +1,1102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>aws-exe-sys System Architecture</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+  :root {
+    --bg: #0a0e17;
+    --surface: #111827;
+    --border: #1e293b;
+    --accent-orange: #f97316;
+    --accent-blue: #3b82f6;
+    --accent-green: #10b981;
+    --accent-purple: #a855f7;
+    --accent-red: #ef4444;
+    --accent-cyan: #06b6d4;
+    --accent-yellow: #eab308;
+    --text: #e2e8f0;
+    --text-dim: #64748b;
+    --text-bright: #f8fafc;
+  }
+  .iac-arch * { margin: 0; padding: 0; box-sizing: border-box; }
+  .iac-arch {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+    padding: 40px 20px;
+    background-image:
+      radial-gradient(ellipse at 20% 50%, rgba(249,115,22,0.04) 0%, transparent 50%),
+      radial-gradient(ellipse at 80% 50%, rgba(16,185,129,0.04) 0%, transparent 50%);
+    border-radius: 12px;
+  }
+  .iac-arch .container {
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+  .iac-arch h1 {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1.4rem;
+    font-weight: 700;
+    color: var(--text-bright);
+    margin-bottom: 6px;
+    letter-spacing: -0.5px;
+  }
+  .iac-arch .subtitle {
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    margin-bottom: 40px;
+    letter-spacing: 0.5px;
+  }
+  .iac-arch .diagram {
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+  }
+
+  /* ─── Account Boundaries ─── */
+  .iac-arch .account {
+    border: 1.5px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    position: relative;
+    background: var(--surface);
+  }
+  .iac-arch .account-label {
+    position: absolute;
+    top: -10px;
+    left: 20px;
+    background: var(--bg);
+    padding: 0 12px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+  }
+  .iac-arch .account.aws { border-color: rgba(249,115,22,0.3); }
+  .iac-arch .account.aws .account-label { color: var(--accent-orange); }
+
+  /* ─── Component Boxes ─── */
+  .iac-arch .components {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    align-items: flex-start;
+  }
+  .iac-arch .component {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 18px;
+    background: rgba(255,255,255,0.02);
+    min-width: 140px;
+    position: relative;
+  }
+  .iac-arch .component-name {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-bright);
+    margin-bottom: 4px;
+  }
+  .iac-arch .component-detail {
+    font-size: 0.65rem;
+    color: var(--text-dim);
+    line-height: 1.5;
+  }
+  .iac-arch .component-icon {
+    font-size: 0.6rem;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 4px;
+    display: inline-block;
+    margin-bottom: 8px;
+  }
+  .iac-arch .icon-s3 { background: rgba(16,185,129,0.15); color: var(--accent-green); }
+  .iac-arch .icon-dynamo { background: rgba(59,130,246,0.15); color: var(--accent-blue); }
+  .iac-arch .icon-lambda { background: rgba(249,115,22,0.15); color: var(--accent-orange); }
+  .iac-arch .icon-build { background: rgba(168,85,247,0.15); color: var(--accent-purple); }
+  .iac-arch .icon-apigw { background: rgba(59,130,246,0.15); color: var(--accent-blue); }
+  .iac-arch .icon-sfn { background: rgba(168,85,247,0.15); color: var(--accent-purple); }
+  .iac-arch .icon-ecr { background: rgba(6,182,212,0.15); color: var(--accent-cyan); }
+  .iac-arch .icon-iam { background: rgba(6,182,212,0.15); color: var(--accent-cyan); }
+
+  /* ─── Group Boxes ─── */
+  .iac-arch .group-box {
+    border: 1px dashed rgba(100,116,139,0.3);
+    border-radius: 8px;
+    padding: 20px 16px 16px;
+    position: relative;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    width: 100%;
+  }
+  .iac-arch .group-label {
+    position: absolute;
+    top: -8px;
+    left: 14px;
+    background: var(--surface);
+    padding: 0 8px;
+    font-size: 0.6rem;
+    font-weight: 600;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+  .iac-arch .group-box.ingress { border-color: rgba(59,130,246,0.25); }
+  .iac-arch .group-box.ingress .group-label { color: var(--accent-blue); }
+  .iac-arch .group-box.storage { border-color: rgba(16,185,129,0.25); }
+  .iac-arch .group-box.storage .group-label { color: var(--accent-green); }
+  .iac-arch .group-box.orchestration { border-color: rgba(249,115,22,0.25); }
+  .iac-arch .group-box.orchestration .group-label { color: var(--accent-orange); }
+  .iac-arch .group-box.execution { border-color: rgba(168,85,247,0.25); }
+  .iac-arch .group-box.execution .group-label { color: var(--accent-purple); }
+  .iac-arch .group-box.infra { border-color: rgba(6,182,212,0.25); }
+  .iac-arch .group-box.infra .group-label { color: var(--accent-cyan); }
+
+  /* ─── Route Arrows ─── */
+  .iac-arch .route-arrow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 8px 0;
+    color: var(--text-dim);
+    font-size: 0.65rem;
+  }
+  .iac-arch .route-arrow .arrow-line {
+    height: 1px;
+    width: 40px;
+    background: var(--border);
+  }
+  .iac-arch .route-arrow .arrow-text {
+    color: var(--text-dim);
+    font-weight: 600;
+    font-size: 0.6rem;
+    letter-spacing: 1px;
+  }
+
+  /* ─── Simplified Overview ─── */
+  .iac-arch .overview {
+    margin-bottom: 56px;
+    padding-bottom: 48px;
+    border-bottom: 1px solid var(--border);
+  }
+  .iac-arch .overview-title {
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--text-bright);
+    margin-bottom: 4px;
+  }
+  .iac-arch .overview-subtitle {
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    margin-bottom: 32px;
+  }
+  .iac-arch .simple-flow {
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    gap: 0;
+    flex-wrap: wrap;
+  }
+  .iac-arch .sf-node {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+  }
+  .iac-arch .sf-box {
+    padding: 18px 28px;
+    border-radius: 10px;
+    border: 1.5px solid;
+    text-align: center;
+    min-width: 170px;
+    background: var(--surface);
+  }
+  .iac-arch .sf-box.blue { border-color: rgba(59,130,246,0.4); }
+  .iac-arch .sf-box.orange { border-color: rgba(249,115,22,0.4); }
+  .iac-arch .sf-box.green { border-color: rgba(16,185,129,0.4); }
+  .iac-arch .sf-box-label {
+    font-size: 0.78rem;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+  .iac-arch .sf-box.blue .sf-box-label { color: var(--accent-blue); }
+  .iac-arch .sf-box.orange .sf-box-label { color: var(--accent-orange); }
+  .iac-arch .sf-box.green .sf-box-label { color: var(--accent-green); }
+  .iac-arch .sf-box-desc {
+    font-size: 0.6rem;
+    color: var(--text-dim);
+    line-height: 1.6;
+  }
+  .iac-arch .sf-arrow {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 0 10px;
+    min-width: 100px;
+    align-self: center;
+  }
+  .iac-arch .sf-arrow-line {
+    display: flex;
+    align-items: center;
+    gap: 0;
+  }
+  .iac-arch .sf-arrow-line .line {
+    height: 1.5px;
+    width: 50px;
+    background: var(--border);
+  }
+  .iac-arch .sf-arrow-line .head {
+    font-size: 0.85rem;
+    color: var(--text-dim);
+    line-height: 1;
+  }
+  .iac-arch .sf-arrow-text {
+    font-size: 0.55rem;
+    color: var(--text-dim);
+    font-weight: 600;
+    letter-spacing: 0.3px;
+    text-align: center;
+    line-height: 1.4;
+  }
+  .iac-arch .sf-who {
+    font-size: 0.55rem;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 4px;
+    margin-top: 2px;
+  }
+  .iac-arch .sf-who.external { background: rgba(59,130,246,0.1); color: var(--accent-blue); }
+  .iac-arch .sf-who.yours { background: rgba(249,115,22,0.1); color: var(--accent-orange); }
+  .iac-arch .sf-who.output { background: rgba(16,185,129,0.1); color: var(--accent-green); }
+  .iac-arch .overview-callouts {
+    display: flex;
+    justify-content: center;
+    gap: 32px;
+    margin-top: 28px;
+    flex-wrap: wrap;
+  }
+  .iac-arch .callout {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.62rem;
+    color: var(--text-dim);
+  }
+  .iac-arch .callout-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .iac-arch .callout-dot.blue { background: var(--accent-blue); }
+  .iac-arch .callout-dot.orange { background: var(--accent-orange); }
+  .iac-arch .callout-dot.green { background: var(--accent-green); }
+
+  /* ─── Flow Steps ─── */
+  .iac-arch .flow-section {
+    margin-top: 40px;
+  }
+  .iac-arch .flow-title {
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: var(--text-bright);
+    margin-bottom: 20px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .iac-arch .flow-steps {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    position: relative;
+  }
+  .iac-arch .flow-step {
+    display: flex;
+    align-items: stretch;
+    gap: 16px;
+    min-height: 56px;
+  }
+  .iac-arch .step-line {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 28px;
+    flex-shrink: 0;
+  }
+  .iac-arch .step-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    margin-top: 6px;
+  }
+  .iac-arch .step-connector {
+    width: 1.5px;
+    flex-grow: 1;
+    min-height: 20px;
+  }
+  .iac-arch .step-content {
+    padding-bottom: 20px;
+    flex: 1;
+  }
+  .iac-arch .step-label {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--text-bright);
+    margin-bottom: 3px;
+  }
+  .iac-arch .step-desc {
+    font-size: 0.65rem;
+    color: var(--text-dim);
+    line-height: 1.5;
+  }
+  .iac-arch .step-tag {
+    display: inline-block;
+    font-size: 0.55rem;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 3px;
+    margin-top: 4px;
+  }
+  .iac-arch .tag-s3 { background: rgba(16,185,129,0.15); color: var(--accent-green); }
+  .iac-arch .tag-lambda { background: rgba(249,115,22,0.15); color: var(--accent-orange); }
+  .iac-arch .tag-dynamo { background: rgba(59,130,246,0.15); color: var(--accent-blue); }
+  .iac-arch .tag-vcs { background: rgba(168,85,247,0.15); color: var(--accent-purple); }
+  .iac-arch .tag-event { background: rgba(6,182,212,0.15); color: var(--accent-cyan); }
+
+  .iac-arch .flow-blue .step-dot { background: var(--accent-blue); }
+  .iac-arch .flow-blue .step-connector { background: rgba(59,130,246,0.2); }
+  .iac-arch .flow-orange .step-dot { background: var(--accent-orange); }
+  .iac-arch .flow-orange .step-connector { background: rgba(249,115,22,0.2); }
+  .iac-arch .flow-green .step-dot { background: var(--accent-green); }
+  .iac-arch .flow-green .step-connector { background: rgba(16,185,129,0.2); }
+  .iac-arch .flow-purple .step-dot { background: var(--accent-purple); }
+  .iac-arch .flow-purple .step-connector { background: rgba(168,85,247,0.2); }
+  .iac-arch .flow-cyan .step-dot { background: var(--accent-cyan); }
+  .iac-arch .flow-cyan .step-connector { background: rgba(6,182,212,0.2); }
+
+  /* ─── Phase Separator ─── */
+  .iac-arch .phase-sep {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin: 16px 0 20px;
+  }
+  .iac-arch .phase-sep .sep-line {
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+  .iac-arch .phase-sep .sep-text {
+    font-size: 0.6rem;
+    font-weight: 700;
+    color: var(--text-dim);
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+
+  /* ─── Two Column Layout ─── */
+  .iac-arch .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+    margin-top: 40px;
+  }
+  .iac-arch .resource-grid, .iac-arch .design-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .iac-arch .resource-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: rgba(255,255,255,0.01);
+    font-size: 0.68rem;
+  }
+  .iac-arch .resource-icon {
+    font-size: 0.55rem;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 4px;
+    flex-shrink: 0;
+  }
+  .iac-arch .resource-name {
+    color: var(--text);
+    font-weight: 500;
+    flex: 1;
+  }
+  .iac-arch .resource-meta {
+    color: var(--text-dim);
+    font-size: 0.6rem;
+    margin-left: auto;
+    white-space: nowrap;
+  }
+  .iac-arch .design-item {
+    padding: 16px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: rgba(255,255,255,0.01);
+  }
+  .iac-arch .design-label {
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--text-bright);
+    margin-bottom: 6px;
+  }
+  .iac-arch .design-desc {
+    font-size: 0.62rem;
+    color: var(--text-dim);
+    line-height: 1.6;
+  }
+
+  /* ─── Deploy Pipeline ─── */
+  .iac-arch .pipeline-section {
+    margin-top: 40px;
+  }
+  .iac-arch .pipeline-steps {
+    display: flex;
+    gap: 0;
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .iac-arch .pipeline-step {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    flex: 1;
+    min-width: 140px;
+    text-align: center;
+    position: relative;
+  }
+  .iac-arch .pipeline-num {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.65rem;
+    font-weight: 700;
+    margin-bottom: 8px;
+    flex-shrink: 0;
+  }
+  .iac-arch .pipeline-num.s3 { background: rgba(16,185,129,0.15); color: var(--accent-green); border: 1px solid rgba(16,185,129,0.3); }
+  .iac-arch .pipeline-num.ecr { background: rgba(6,182,212,0.15); color: var(--accent-cyan); border: 1px solid rgba(6,182,212,0.3); }
+  .iac-arch .pipeline-num.docker { background: rgba(168,85,247,0.15); color: var(--accent-purple); border: 1px solid rgba(168,85,247,0.3); }
+  .iac-arch .pipeline-num.deploy { background: rgba(249,115,22,0.15); color: var(--accent-orange); border: 1px solid rgba(249,115,22,0.3); }
+  .iac-arch .pipeline-num.test { background: rgba(59,130,246,0.15); color: var(--accent-blue); border: 1px solid rgba(59,130,246,0.3); }
+  .iac-arch .pipeline-num.archive { background: rgba(234,179,8,0.15); color: var(--accent-yellow); border: 1px solid rgba(234,179,8,0.3); }
+  .iac-arch .pipeline-label {
+    font-size: 0.68rem;
+    font-weight: 600;
+    color: var(--text-bright);
+    margin-bottom: 4px;
+  }
+  .iac-arch .pipeline-desc {
+    font-size: 0.58rem;
+    color: var(--text-dim);
+    line-height: 1.5;
+    max-width: 130px;
+  }
+  .iac-arch .pipeline-connector {
+    position: absolute;
+    top: 14px;
+    right: -4px;
+    width: 8px;
+    height: 1.5px;
+    background: var(--border);
+  }
+  .iac-arch .pipeline-step:last-child .pipeline-connector { display: none; }
+
+  /* ─── Responsive ─── */
+  @media (max-width: 768px) {
+    .iac-arch .two-col { grid-template-columns: 1fr; }
+    .iac-arch .simple-flow { flex-direction: column; align-items: center; }
+    .iac-arch .sf-arrow { transform: rotate(90deg); padding: 12px 0; min-width: unset; }
+    .iac-arch .pipeline-steps { flex-direction: column; align-items: center; }
+    .iac-arch .pipeline-connector { display: none !important; }
+    .iac-arch .pipeline-step { min-width: unset; width: 100%; max-width: 300px; }
+  }
+</style>
+</head>
+<body>
+<div class="iac-arch">
+<div class="container">
+
+  <h1>aws-exe-sys &rsaquo; System Architecture</h1>
+  <p class="subtitle">Event-driven execution engine for infrastructure-as-code on AWS</p>
+
+  <!-- ═══════════════════════════════════════ -->
+  <!-- SIMPLIFIED OVERVIEW                     -->
+  <!-- ═══════════════════════════════════════ -->
+  <div class="overview">
+    <div class="overview-title">How It Works</div>
+    <div class="overview-subtitle">Jobs come in via API, execute on your AWS account, results go back to your PR</div>
+
+    <div class="simple-flow">
+      <!-- Caller -->
+      <div class="sf-node">
+        <div class="sf-box blue">
+          <div class="sf-box-label">Caller</div>
+          <div class="sf-box-desc">
+            Sends job payload<br>
+            (SigV4 + JWT)
+          </div>
+        </div>
+        <span class="sf-who external">External caller</span>
+      </div>
+
+      <!-- Arrow 1 -->
+      <div class="sf-arrow">
+        <div class="sf-arrow-line">
+          <span class="line"></span>
+          <span class="head">&#9656;</span>
+        </div>
+        <div class="sf-arrow-text">
+          POST /init<br>
+          job payload
+        </div>
+      </div>
+
+      <!-- Your AWS Account -->
+      <div class="sf-node">
+        <div class="sf-box orange">
+          <div class="sf-box-label">Your AWS Account</div>
+          <div class="sf-box-desc">
+            Validates &amp; queues orders<br>
+            Resolves dependencies<br>
+            Executes via Lambda/CodeBuild<br>
+            SOPS-encrypted credentials
+          </div>
+        </div>
+        <span class="sf-who yours">Fully serverless</span>
+      </div>
+
+      <!-- Arrow 2 -->
+      <div class="sf-arrow">
+        <div class="sf-arrow-line">
+          <span class="line"></span>
+          <span class="head">&#9656;</span>
+        </div>
+        <div class="sf-arrow-text">
+          PR comment<br>
+          + status update
+        </div>
+      </div>
+
+      <!-- Results -->
+      <div class="sf-node">
+        <div class="sf-box green">
+          <div class="sf-box-label">Results</div>
+          <div class="sf-box-desc">
+            PR comment with status<br>
+            Per-order logs &amp; exit codes<br>
+            Dependency graph resolved
+          </div>
+        </div>
+        <span class="sf-who output">VCS PR updated</span>
+      </div>
+    </div>
+
+    <div class="overview-callouts">
+      <div class="callout">
+        <div class="callout-dot blue"></div>
+        Fully serverless &mdash; nothing runs 24/7
+      </div>
+      <div class="callout">
+        <div class="callout-dot orange"></div>
+        All working data auto-cleans via TTL and S3 lifecycle
+      </div>
+      <div class="callout">
+        <div class="callout-dot green"></div>
+        Single Docker image for all Lambda functions and CodeBuild
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════ -->
+  <!-- DETAILED TECHNICAL DIAGRAM              -->
+  <!-- ═══════════════════════════════════════ -->
+  <div style="margin-bottom: 6px;">
+    <div class="overview-title">Technical Details</div>
+    <p class="overview-subtitle">All AWS resources deployed into your account</p>
+  </div>
+
+  <div class="diagram">
+    <div class="account aws">
+      <div class="account-label">Your AWS Account</div>
+
+      <div style="display: flex; flex-direction: column; gap: 20px;">
+
+        <!-- INGRESS GROUP -->
+        <div class="group-box ingress">
+          <div class="group-label">Ingress</div>
+          <div class="component">
+            <span class="component-icon icon-apigw">APIGW</span>
+            <div class="component-name">API Gateway</div>
+            <div class="component-detail">
+              aws-exe-sys-api<br>
+              POST /init, POST /ssm<br>
+              HTTP API, auto-deploy
+            </div>
+          </div>
+          <div class="component" style="flex: 1; min-width: 260px;">
+            <span class="component-icon icon-lambda">&lambda;</span>
+            <div class="component-name">init_job</div>
+            <div class="component-detail">
+              Validates orders &amp; dependencies<br>
+              Fetches code (S3/Git), secrets (SSM/SecretsManager)<br>
+              Encrypts creds with SOPS into exec.zip<br>
+              Stores SOPS key in SSM as SecureString<br>
+              Generates presigned callback URLs<br>
+              Posts initial PR comment<br>
+              <span style="color: var(--accent-orange);">300s timeout &middot; 512MB</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- STORAGE GROUP -->
+        <div class="group-box storage">
+          <div class="group-label">Storage</div>
+          <div class="component">
+            <span class="component-icon icon-s3">S3</span>
+            <div class="component-name">Internal Bucket</div>
+            <div class="component-detail">
+              aws-exe-sys-internal-*<br>
+              tmp/exec/ (exec.zip)<br>
+              tmp/callbacks/ (result.json)<br>
+              <span style="color: var(--accent-yellow);">1-day lifecycle</span>
+            </div>
+          </div>
+          <div class="component">
+            <span class="component-icon icon-s3">S3</span>
+            <div class="component-name">Done Bucket</div>
+            <div class="component-detail">
+              aws-exe-sys-done-*<br>
+              &lt;run_id&gt;/done<br>
+              Completion markers<br>
+              <span style="color: var(--accent-yellow);">1-day lifecycle</span>
+            </div>
+          </div>
+          <div class="component">
+            <span class="component-icon icon-s3">S3</span>
+            <div class="component-name">State Bucket</div>
+            <div class="component-detail">
+              aws-exe-sys-state-*<br>
+              TF state + teardown archive<br>
+              <span style="color: var(--accent-green);">Permanent</span>
+            </div>
+          </div>
+          <div class="component">
+            <span class="component-icon icon-dynamo">DDB</span>
+            <div class="component-name">orders</div>
+            <div class="component-detail">
+              PK: run_id:order_num<br>
+              Status, cmds, deps, timeout<br>
+              <span style="color: var(--accent-yellow);">TTL: 1 day</span>
+            </div>
+          </div>
+          <div class="component">
+            <span class="component-icon icon-dynamo">DDB</span>
+            <div class="component-name">order_events</div>
+            <div class="component-detail">
+              PK: trace_id<br>
+              SK: order_name:epoch<br>
+              GSI: order_name + epoch<br>
+              <span style="color: var(--accent-yellow);">TTL: 90 days</span>
+            </div>
+          </div>
+          <div class="component">
+            <span class="component-icon icon-dynamo">DDB</span>
+            <div class="component-name">locks</div>
+            <div class="component-detail">
+              PK: lock:run_id<br>
+              Conditional put (mutex)<br>
+              <span style="color: var(--accent-yellow);">TTL: max_timeout</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- ORCHESTRATION GROUP -->
+        <div class="group-box orchestration">
+          <div class="group-label">Orchestration</div>
+          <div class="component" style="flex: 1; min-width: 260px;">
+            <span class="component-icon icon-lambda">&lambda;</span>
+            <div class="component-name">orchestrator</div>
+            <div class="component-detail">
+              Triggered by S3 ObjectCreated events<br>
+              Acquires per-run DynamoDB lock<br>
+              Evaluates dependency graph<br>
+              Dispatches ready orders in parallel<br>
+              Finalizes when all orders complete<br>
+              <span style="color: var(--accent-orange);">600s timeout &middot; 512MB</span>
+            </div>
+          </div>
+          <div class="component">
+            <span class="component-icon icon-sfn">SFN</span>
+            <div class="component-name">watchdog</div>
+            <div class="component-detail">
+              aws-exe-sys-watchdog<br>
+              Per-order timeout safety<br>
+              Polls every 60s<br>
+              Writes timed_out result<br>
+              if worker unresponsive
+            </div>
+          </div>
+          <div class="component">
+            <span class="component-icon icon-lambda">&lambda;</span>
+            <div class="component-name">watchdog_check</div>
+            <div class="component-detail">
+              Checks callback S3<br>
+              Called by Step Function<br>
+              <span style="color: var(--accent-orange);">60s timeout &middot; 256MB</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- EXECUTION GROUP -->
+        <div class="group-box execution">
+          <div class="group-label">Execution</div>
+          <div class="component">
+            <span class="component-icon icon-lambda">&lambda;</span>
+            <div class="component-name">worker (Lambda)</div>
+            <div class="component-detail">
+              Short-lived orders<br>
+              Fetches SOPS key from SSM<br>
+              Decrypts SOPS &rarr; env vars<br>
+              Runs commands, captures output<br>
+              PUTs result.json via presigned URL<br>
+              <span style="color: var(--accent-orange);">600s timeout &middot; 1024MB</span>
+            </div>
+          </div>
+          <div class="component">
+            <span class="component-icon icon-build">BUILD</span>
+            <div class="component-name">worker (CodeBuild)</div>
+            <div class="component-detail">
+              aws-exe-sys-worker<br>
+              Long-running orders<br>
+              Same image, /entrypoint.sh CMD<br>
+              Fetches SOPS key from SSM<br>
+              No timeout limit (vs Lambda 15min)<br>
+              PUTs result.json via presigned URL
+            </div>
+          </div>
+        </div>
+
+        <!-- INFRASTRUCTURE GROUP -->
+        <div class="group-box infra">
+          <div class="group-label">Infrastructure</div>
+          <div class="component">
+            <span class="component-icon icon-ecr">ECR</span>
+            <div class="component-name">ECR Repository</div>
+            <div class="component-detail">
+              aws-exe-sys<br>
+              Single image, all functions<br>
+              Keep last 10 images<br>
+              Scan on push
+            </div>
+          </div>
+          <div class="component">
+            <span class="component-icon icon-iam">IAM</span>
+            <div class="component-name">IAM Roles</div>
+            <div class="component-detail">
+              Per-function least privilege<br>
+              aws-exe-sys-init-job-role<br>
+              aws-exe-sys-orchestrator-role<br>
+              aws-exe-sys-worker-role<br>
+              aws-exe-sys-codebuild-role
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════ -->
+  <!-- EXECUTION FLOW                          -->
+  <!-- ═══════════════════════════════════════ -->
+  <div class="flow-section">
+    <div class="flow-title">Execution Flow</div>
+
+    <!-- Part 1: init_job -->
+    <div class="phase-sep">
+      <div class="sep-line"></div>
+      <div class="sep-text">Part 1: init_job</div>
+      <div class="sep-line"></div>
+    </div>
+
+    <div class="flow-steps">
+      <div class="flow-step flow-blue">
+        <div class="step-line"><div class="step-dot"></div><div class="step-connector"></div></div>
+        <div class="step-content">
+          <div class="step-label">1 &rsaquo; Caller &rarr; API Gateway</div>
+          <div class="step-desc">POST /init with job payload containing orders, dependencies, and target account info</div>
+          <span class="step-tag tag-event">APIGW</span>
+        </div>
+      </div>
+
+      <div class="flow-step flow-orange">
+        <div class="step-line"><div class="step-dot"></div><div class="step-connector"></div></div>
+        <div class="step-content">
+          <div class="step-label">2 &rsaquo; Validate &amp; repackage orders</div>
+          <div class="step-desc">init_job validates all orders, fetches code (S3/Git), retrieves secrets from SSM/Secrets Manager, encrypts credentials with SOPS (age key), stores SOPS private key in SSM Parameter Store as SecureString, generates presigned S3 PUT URLs for worker callbacks</div>
+          <span class="step-tag tag-lambda">LAMBDA</span>
+        </div>
+      </div>
+
+      <div class="flow-step flow-green">
+        <div class="step-line"><div class="step-dot"></div><div class="step-connector"></div></div>
+        <div class="step-content">
+          <div class="step-label">3 &rsaquo; Upload exec.zip to S3</div>
+          <div class="step-desc">Each order packaged as exec.zip at s3://internal/tmp/exec/&lt;run_id&gt;/&lt;order_num&gt;/exec.zip</div>
+          <span class="step-tag tag-s3">S3</span>
+        </div>
+      </div>
+
+      <div class="flow-step flow-blue">
+        <div class="step-line"><div class="step-dot"></div><div class="step-connector"></div></div>
+        <div class="step-content">
+          <div class="step-label">4 &rsaquo; Insert into DynamoDB</div>
+          <div class="step-desc">Orders table (status: queued) and order_events table (trace_id tracking)</div>
+          <span class="step-tag tag-dynamo">DDB</span>
+        </div>
+      </div>
+
+      <div class="flow-step flow-purple">
+        <div class="step-line"><div class="step-dot"></div><div class="step-connector"></div></div>
+        <div class="step-content">
+          <div class="step-label">5 &rsaquo; Post initial PR comment</div>
+          <div class="step-desc">VCS abstraction posts order list with &ldquo;queued&rdquo; status to the PR</div>
+          <span class="step-tag tag-vcs">VCS</span>
+        </div>
+      </div>
+
+      <div class="flow-step flow-cyan">
+        <div class="step-line"><div class="step-dot"></div><div class="step-connector"></div></div>
+        <div class="step-content">
+          <div class="step-label">6 &rsaquo; Trigger orchestrator</div>
+          <div class="step-desc">Write init result.json to s3://internal/tmp/callbacks/runs/&lt;run_id&gt;/0000/ &mdash; S3 ObjectCreated event fires</div>
+          <span class="step-tag tag-event">S3 EVENT</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Part 2: execute_orders -->
+    <div class="phase-sep">
+      <div class="sep-line"></div>
+      <div class="sep-text">Part 2: execute_orders (orchestrator)</div>
+      <div class="sep-line"></div>
+    </div>
+
+    <div class="flow-steps">
+      <div class="flow-step flow-cyan">
+        <div class="step-line"><div class="step-dot"></div><div class="step-connector"></div></div>
+        <div class="step-content">
+          <div class="step-label">7 &rsaquo; S3 event &rarr; orchestrator Lambda</div>
+          <div class="step-desc">ObjectCreated on tmp/callbacks/runs/ prefix triggers orchestrator</div>
+          <span class="step-tag tag-event">S3 EVENT</span>
+        </div>
+      </div>
+
+      <div class="flow-step flow-blue">
+        <div class="step-line"><div class="step-dot"></div><div class="step-connector"></div></div>
+        <div class="step-content">
+          <div class="step-label">8 &rsaquo; Acquire per-run lock</div>
+          <div class="step-desc">DynamoDB conditional put on lock:&lt;run_id&gt; &mdash; prevents concurrent orchestrator invocations</div>
+          <span class="step-tag tag-dynamo">DDB LOCK</span>
+        </div>
+      </div>
+
+      <div class="flow-step flow-orange">
+        <div class="step-line"><div class="step-dot"></div><div class="step-connector"></div></div>
+        <div class="step-content">
+          <div class="step-label">9 &rsaquo; Evaluate dependency graph</div>
+          <div class="step-desc">Check completed callbacks, update order statuses. For each queued order: no deps or all deps succeeded &rarr; ready; any must_succeed dep failed &rarr; fail; deps still running &rarr; skip</div>
+          <span class="step-tag tag-lambda">LAMBDA</span>
+        </div>
+      </div>
+
+      <div class="flow-step flow-purple">
+        <div class="step-line"><div class="step-dot"></div><div class="step-connector"></div></div>
+        <div class="step-content">
+          <div class="step-label">10 &rsaquo; Dispatch ready orders (parallel)</div>
+          <div class="step-desc">Invoke worker Lambda (short orders) or start CodeBuild project (long orders) &mdash; multiple orders dispatched in parallel</div>
+          <span class="step-tag tag-lambda">LAMBDA / CODEBUILD</span>
+        </div>
+      </div>
+
+      <div class="flow-step flow-purple">
+        <div class="step-line"><div class="step-dot"></div><div class="step-connector"></div></div>
+        <div class="step-content">
+          <div class="step-label">11 &rsaquo; Start watchdog per order</div>
+          <div class="step-desc">Step Function polls S3 callback every 60s &mdash; writes timed_out result.json if worker unresponsive past timeout</div>
+          <span class="step-tag tag-event">STEP FUNCTION</span>
+        </div>
+      </div>
+
+      <div class="flow-step flow-green">
+        <div class="step-line"><div class="step-dot"></div><div class="step-connector"></div></div>
+        <div class="step-content">
+          <div class="step-label">12 &rsaquo; Worker executes &amp; callbacks</div>
+          <div class="step-desc">Worker fetches SOPS private key from SSM Parameter Store, decrypts SOPS bundle &rarr; env vars, runs commands, captures stdout/stderr, PUTs result.json (status + log) via presigned URL &mdash; no DynamoDB creds needed</div>
+          <span class="step-tag tag-s3">PRESIGNED PUT</span>
+        </div>
+      </div>
+
+      <div class="flow-step flow-cyan">
+        <div class="step-line"><div class="step-dot"></div><div class="step-connector"></div></div>
+        <div class="step-content">
+          <div class="step-label">13 &rsaquo; S3 callback &rarr; orchestrator (loop)</div>
+          <div class="step-desc">result.json write triggers orchestrator again &mdash; re-evaluates graph, dispatches next wave of ready orders. Repeats until all orders complete.</div>
+          <span class="step-tag tag-event">S3 EVENT LOOP</span>
+        </div>
+      </div>
+
+      <div class="flow-step flow-green">
+        <div class="step-line"><div class="step-dot"></div><div class="step-connector"></div></div>
+        <div class="step-content">
+          <div class="step-label">14 &rsaquo; Finalize</div>
+          <div class="step-desc">All orders done &rarr; write done marker to S3, clean up SOPS key SSM parameters, update final PR comment with summary, release lock</div>
+          <span class="step-tag tag-vcs">VCS + S3</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════ -->
+  <!-- TWO-COLUMN: RESOURCES + DESIGN          -->
+  <!-- ═══════════════════════════════════════ -->
+  <div class="two-col">
+    <!-- LEFT: Resources Summary -->
+    <div>
+      <div class="flow-title">AWS Resources Summary</div>
+      <div class="resource-grid">
+        <div class="resource-item">
+          <span class="resource-icon icon-lambda">&lambda;</span>
+          <span class="resource-name">init_job</span>
+          <span class="resource-meta">300s &middot; 512MB</span>
+        </div>
+        <div class="resource-item">
+          <span class="resource-icon icon-lambda">&lambda;</span>
+          <span class="resource-name">orchestrator</span>
+          <span class="resource-meta">600s &middot; 512MB</span>
+        </div>
+        <div class="resource-item">
+          <span class="resource-icon icon-lambda">&lambda;</span>
+          <span class="resource-name">watchdog_check</span>
+          <span class="resource-meta">60s &middot; 256MB</span>
+        </div>
+        <div class="resource-item">
+          <span class="resource-icon icon-lambda">&lambda;</span>
+          <span class="resource-name">worker</span>
+          <span class="resource-meta">600s &middot; 1024MB</span>
+        </div>
+        <div class="resource-item">
+          <span class="resource-icon icon-dynamo">DDB</span>
+          <span class="resource-name">aws-exe-sys-orders</span>
+          <span class="resource-meta">TTL: 1 day</span>
+        </div>
+        <div class="resource-item">
+          <span class="resource-icon icon-dynamo">DDB</span>
+          <span class="resource-name">aws-exe-sys-order-events</span>
+          <span class="resource-meta">TTL: 90 days</span>
+        </div>
+        <div class="resource-item">
+          <span class="resource-icon icon-dynamo">DDB</span>
+          <span class="resource-name">aws-exe-sys-locks</span>
+          <span class="resource-meta">TTL: dynamic</span>
+        </div>
+        <div class="resource-item">
+          <span class="resource-icon icon-s3">S3</span>
+          <span class="resource-name">internal + done + state</span>
+          <span class="resource-meta">3 buckets</span>
+        </div>
+        <div class="resource-item">
+          <span class="resource-icon icon-apigw">API</span>
+          <span class="resource-name">HTTP API + CodeBuild + SFN + ECR</span>
+          <span class="resource-meta">4 more</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT: Design Decisions -->
+    <div>
+      <div class="flow-title">Key Design Decisions</div>
+      <div class="design-grid">
+        <div class="design-item">
+          <div class="design-label">Single Docker Image</div>
+          <div class="design-desc">All 4 Lambda functions + CodeBuild share one ECR image. Lambda overrides CMD per function. CodeBuild uses the default /entrypoint.sh.</div>
+        </div>
+        <div class="design-item">
+          <div class="design-label">Event-Driven Orchestration</div>
+          <div class="design-desc">No polling loops or chained Lambda invocations. S3 ObjectCreated events on the callbacks prefix trigger the orchestrator to re-evaluate the dependency graph.</div>
+        </div>
+        <div class="design-item">
+          <div class="design-label">No Worker Credentials</div>
+          <div class="design-desc">Workers callback via presigned S3 PUT URLs baked into the SOPS bundle. No DynamoDB or orchestrator permissions needed on the worker side.</div>
+        </div>
+        <div class="design-item">
+          <div class="design-label">SOPS Encryption</div>
+          <div class="design-desc">Target account credentials are fetched from SSM/Secrets Manager during repackage, encrypted with SOPS (age key) into exec.zip. The SOPS private key is stored in SSM Parameter Store as SecureString at /aws-exe-sys/sops-keys/&lt;run_id&gt;/&lt;order_num&gt;. Workers fetch the key from SSM to decrypt. Keys are cleaned up during finalization. Never stored in DynamoDB.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════ -->
+  <!-- DEPLOYMENT PIPELINE                     -->
+  <!-- ═══════════════════════════════════════ -->
+  <div class="pipeline-section">
+    <div class="flow-title">Deployment Pipeline (GitHub Actions)</div>
+    <div class="pipeline-steps">
+      <div class="pipeline-step">
+        <div class="pipeline-num s3">1</div>
+        <div class="pipeline-label">Bootstrap</div>
+        <div class="pipeline-desc">Create S3 state bucket<br>Terraform, local state</div>
+        <div class="pipeline-connector"></div>
+      </div>
+      <div class="pipeline-step">
+        <div class="pipeline-num ecr">2</div>
+        <div class="pipeline-label">ECR</div>
+        <div class="pipeline-desc">Create ECR repository<br>Terraform, remote state</div>
+        <div class="pipeline-connector"></div>
+      </div>
+      <div class="pipeline-step">
+        <div class="pipeline-num docker">3</div>
+        <div class="pipeline-label">Docker</div>
+        <div class="pipeline-desc">Build &amp; push image<br>SHA + latest tags</div>
+        <div class="pipeline-connector"></div>
+      </div>
+      <div class="pipeline-step">
+        <div class="pipeline-num deploy">4</div>
+        <div class="pipeline-label">Deploy</div>
+        <div class="pipeline-desc">All AWS resources<br>Terraform, remote state</div>
+        <div class="pipeline-connector"></div>
+      </div>
+      <div class="pipeline-step">
+        <div class="pipeline-num test">5</div>
+        <div class="pipeline-label">Smoke Tests</div>
+        <div class="pipeline-desc">Verify API, Lambda,<br>DynamoDB, S3, ECR</div>
+        <div class="pipeline-connector"></div>
+      </div>
+      <div class="pipeline-step">
+        <div class="pipeline-num archive">6</div>
+        <div class="pipeline-label">Archive</div>
+        <div class="pipeline-desc">Zip TF code + tfvars<br>Upload for teardown</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,4 @@
+image_tag      = "latest"
+ecr_repo       = "<ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/aws-exe-sys"
+aws_region     = "us-east-1"
+project_prefix = "aws-exe-sys"

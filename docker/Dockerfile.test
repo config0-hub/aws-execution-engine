@@ -1,0 +1,12 @@
+FROM public.ecr.aws/lambda/python:3.14
+
+# Install dependencies
+COPY requirements.txt requirements-test.txt ./
+RUN python3 -m pip install -r requirements.txt -r requirements-test.txt --target ${LAMBDA_TASK_ROOT}
+
+# Copy source and tests
+COPY src/ ${LAMBDA_TASK_ROOT}/src/
+COPY tests/ ${LAMBDA_TASK_ROOT}/tests/
+
+ENTRYPOINT ["python3", "-m", "pytest"]
+CMD ["tests/unit/", "-v"]
