@@ -1,4 +1,4 @@
-"""Unit tests for src/worker/run.py."""
+"""Unit tests for aws_exe_sys/worker/run.py."""
 
 import json
 import os
@@ -8,7 +8,8 @@ from unittest.mock import patch, MagicMock, call
 
 import pytest
 
-from src.worker.run import (
+from aws_exe_sys.common.sops import SopsKeyExpired
+from aws_exe_sys.worker.run import (
     run,
     _execute_commands,
     _setup_events_dir,
@@ -114,7 +115,7 @@ class TestSetupEventsDir:
 
 
 class TestCollectAndWriteEvents:
-    @patch("src.worker.run.dynamodb.put_event")
+    @patch("aws_exe_sys.worker.run.dynamodb.put_event")
     def test_writes_events_to_dynamodb(self, mock_put_event):
         with tempfile.TemporaryDirectory() as events_dir:
             # Write two event files
@@ -152,7 +153,7 @@ class TestCollectAndWriteEvents:
             assert call_args_1[1]["event_type"] == "tf_plan"
             assert call_args_1[1]["data"]["message"] == "Plan: 3 to add"
 
-    @patch("src.worker.run.dynamodb.put_event")
+    @patch("aws_exe_sys.worker.run.dynamodb.put_event")
     def test_empty_dir_no_calls(self, mock_put_event):
         with tempfile.TemporaryDirectory() as events_dir:
             count = _collect_and_write_events(
@@ -161,7 +162,7 @@ class TestCollectAndWriteEvents:
             assert count == 0
             mock_put_event.assert_not_called()
 
-    @patch("src.worker.run.dynamodb.put_event")
+    @patch("aws_exe_sys.worker.run.dynamodb.put_event")
     def test_nonexistent_dir_no_calls(self, mock_put_event):
         count = _collect_and_write_events(
             "/nonexistent/path", "trace-1", "my-order",
@@ -169,7 +170,7 @@ class TestCollectAndWriteEvents:
         assert count == 0
         mock_put_event.assert_not_called()
 
-    @patch("src.worker.run.dynamodb.put_event")
+    @patch("aws_exe_sys.worker.run.dynamodb.put_event")
     def test_malformed_json_skipped(self, mock_put_event):
         with tempfile.TemporaryDirectory() as events_dir:
             # Write invalid JSON
@@ -185,7 +186,7 @@ class TestCollectAndWriteEvents:
             assert count == 1
             mock_put_event.assert_called_once()
 
-    @patch("src.worker.run.dynamodb.put_event")
+    @patch("aws_exe_sys.worker.run.dynamodb.put_event")
     def test_non_dict_json_skipped(self, mock_put_event):
         with tempfile.TemporaryDirectory() as events_dir:
             with open(os.path.join(events_dir, "array.json"), "w") as f:
@@ -197,7 +198,7 @@ class TestCollectAndWriteEvents:
             assert count == 0
             mock_put_event.assert_not_called()
 
-    @patch("src.worker.run.dynamodb.put_event")
+    @patch("aws_exe_sys.worker.run.dynamodb.put_event")
     def test_missing_fields_uses_fallbacks(self, mock_put_event):
         with tempfile.TemporaryDirectory() as events_dir:
             # JSON with no event_type or status — uses filename stem and "info"
@@ -213,7 +214,7 @@ class TestCollectAndWriteEvents:
             assert call_kwargs["status"] == "info"
             assert call_kwargs["data"]["message"] == "all good"
 
-    @patch("src.worker.run.dynamodb.put_event")
+    @patch("aws_exe_sys.worker.run.dynamodb.put_event")
     def test_dynamodb_error_does_not_crash(self, mock_put_event):
         mock_put_event.side_effect = Exception("DynamoDB unavailable")
         with tempfile.TemporaryDirectory() as events_dir:
@@ -227,10 +228,10 @@ class TestCollectAndWriteEvents:
 
 
 class TestRun:
-    @patch("src.worker.run._collect_and_write_events")
-    @patch("src.worker.run.send_callback")
-    @patch("src.worker.run._decrypt_and_load_env")
-    @patch("src.worker.run.fetch_code_s3")
+    @patch("aws_exe_sys.worker.run._collect_and_write_events")
+    @patch("aws_exe_sys.worker.run.send_callback")
+    @patch("aws_exe_sys.worker.run._decrypt_and_load_env")
+    @patch("aws_exe_sys.worker.run.fetch_code_s3")
     def test_successful_run(self, mock_fetch, mock_decrypt, mock_callback, mock_collect):
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create cmds.json
@@ -262,10 +263,10 @@ class TestRun:
             assert collect_args[3] == "flow-1"  # flow_id
             assert collect_args[4] == "run-1"   # run_id
 
-    @patch("src.worker.run._collect_and_write_events")
-    @patch("src.worker.run.send_callback")
-    @patch("src.worker.run._decrypt_and_load_env")
-    @patch("src.worker.run.fetch_code_s3")
+    @patch("aws_exe_sys.worker.run._collect_and_write_events")
+    @patch("aws_exe_sys.worker.run.send_callback")
+    @patch("aws_exe_sys.worker.run._decrypt_and_load_env")
+    @patch("aws_exe_sys.worker.run.fetch_code_s3")
     def test_failed_run(self, mock_fetch, mock_decrypt, mock_callback, mock_collect):
         with tempfile.TemporaryDirectory() as tmpdir:
             with open(os.path.join(tmpdir, "cmds.json"), "w") as f:
@@ -286,9 +287,9 @@ class TestRun:
             # Events still collected even on failure
             mock_collect.assert_called_once()
 
-    @patch("src.worker.run.send_callback")
-    @patch("src.worker.run._decrypt_and_load_env")
-    @patch("src.worker.run.fetch_code_s3")
+    @patch("aws_exe_sys.worker.run.send_callback")
+    @patch("aws_exe_sys.worker.run._decrypt_and_load_env")
+    @patch("aws_exe_sys.worker.run.fetch_code_s3")
     def test_no_commands(self, mock_fetch, mock_decrypt, mock_callback):
         with tempfile.TemporaryDirectory() as tmpdir:
             mock_fetch.return_value = tmpdir
@@ -298,10 +299,10 @@ class TestRun:
 
             assert status == "failed"
 
-    @patch("src.worker.run._collect_and_write_events")
-    @patch("src.worker.run.send_callback")
-    @patch("src.worker.run._decrypt_and_load_env")
-    @patch("src.worker.run.fetch_code_s3")
+    @patch("aws_exe_sys.worker.run._collect_and_write_events")
+    @patch("aws_exe_sys.worker.run.send_callback")
+    @patch("aws_exe_sys.worker.run._decrypt_and_load_env")
+    @patch("aws_exe_sys.worker.run.fetch_code_s3")
     def test_cmds_from_env(self, mock_fetch, mock_decrypt, mock_callback, mock_collect):
         with tempfile.TemporaryDirectory() as tmpdir:
             mock_fetch.return_value = tmpdir
@@ -316,10 +317,10 @@ class TestRun:
 
             assert status == "succeeded"
 
-    @patch("src.worker.run._collect_and_write_events")
-    @patch("src.worker.run.send_callback")
-    @patch("src.worker.run._decrypt_and_load_env")
-    @patch("src.worker.run.fetch_code_s3")
+    @patch("aws_exe_sys.worker.run._collect_and_write_events")
+    @patch("aws_exe_sys.worker.run.send_callback")
+    @patch("aws_exe_sys.worker.run._decrypt_and_load_env")
+    @patch("aws_exe_sys.worker.run.fetch_code_s3")
     def test_no_trace_id_skips_events(self, mock_fetch, mock_decrypt, mock_callback, mock_collect):
         """Without TRACE_ID, events dir is not set up and collection is skipped."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -334,10 +335,10 @@ class TestRun:
             assert status == "succeeded"
             mock_collect.assert_not_called()
 
-    @patch("src.worker.run._collect_and_write_events")
-    @patch("src.worker.run.send_callback")
-    @patch("src.worker.run._decrypt_and_load_env")
-    @patch("src.worker.run.fetch_code_s3")
+    @patch("aws_exe_sys.worker.run._collect_and_write_events")
+    @patch("aws_exe_sys.worker.run.send_callback")
+    @patch("aws_exe_sys.worker.run._decrypt_and_load_env")
+    @patch("aws_exe_sys.worker.run.fetch_code_s3")
     def test_sops_key_passed_to_decrypt(self, mock_fetch, mock_decrypt, mock_callback, mock_collect):
         """Verify sops_key_ssm_path is forwarded to _decrypt_and_load_env."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -351,10 +352,74 @@ class TestRun:
 
             mock_decrypt.assert_called_once_with(tmpdir, sops_key_ssm_path="/my/ssm/path")
 
-    @patch("src.worker.run._collect_and_write_events")
-    @patch("src.worker.run.send_callback")
-    @patch("src.worker.run._decrypt_and_load_env")
-    @patch("src.worker.run.fetch_code_s3")
+    @patch("aws_exe_sys.worker.run.send_callback")
+    @patch("aws_exe_sys.worker.run._decrypt_and_load_env")
+    @patch("aws_exe_sys.worker.run.fetch_code_s3")
+    def test_run_threads_run_id_to_callback_on_sops_expired(
+        self, mock_fetch, mock_decrypt, mock_callback,
+    ):
+        """On SopsKeyExpired, env_vars is empty — run_id/order_num MUST come
+        from run()'s explicit parameters and be threaded through to
+        send_callback's DynamoDB fallback.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mock_fetch.return_value = tmpdir
+            mock_decrypt.side_effect = SopsKeyExpired("key gone")
+
+            status = run(
+                "s3://bucket/exec.zip",
+                sops_key_ssm_path="/sops/r1/0001",
+                callback_url="https://cb.url",
+                run_id="r1",
+                order_num="0001",
+            )
+
+            assert status == "failed"
+            mock_callback.assert_called_once()
+            kwargs = mock_callback.call_args.kwargs
+            assert kwargs["run_id"] == "r1"
+            assert kwargs["order_num"] == "0001"
+
+    @patch("aws_exe_sys.worker.run.send_callback")
+    @patch("aws_exe_sys.worker.run._decrypt_and_load_env")
+    @patch("aws_exe_sys.worker.run.fetch_code_s3")
+    def test_callback_failed_on_sops_key_expired(
+        self, mock_fetch, mock_decrypt, mock_callback
+    ):
+        """When the SOPS key parameter has expired/been deleted from SSM,
+        the worker must callback with status=failed and error=sops_key_expired
+        instead of crashing with a raw boto3 error. The orchestrator relies
+        on the callback to finalize the order; without it, the order hangs
+        until the step-function watchdog fires (~5 min later).
+
+        The callback_url is passed as a plaintext argument (not inside the
+        SOPS bundle) precisely so it remains reachable when the bundle
+        cannot be decrypted.
+        """
+        fallback_url = "https://callback.example.internal/run-x/000"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mock_fetch.return_value = tmpdir
+            mock_decrypt.side_effect = SopsKeyExpired(
+                "SOPS key /aws-exe-sys/sops-keys/run-x/000 is missing or expired"
+            )
+
+            status = run(
+                "s3://bucket/exec.zip",
+                sops_key_ssm_path="/aws-exe-sys/sops-keys/run-x/000",
+                callback_url=fallback_url,
+            )
+
+            assert status == "failed"
+            mock_callback.assert_called_once()
+            args, kwargs = mock_callback.call_args
+            assert args[0] == fallback_url
+            assert args[1] == "failed"
+            assert "sops_key_expired" in args[2].lower()
+
+    @patch("aws_exe_sys.worker.run._collect_and_write_events")
+    @patch("aws_exe_sys.worker.run.send_callback")
+    @patch("aws_exe_sys.worker.run._decrypt_and_load_env")
+    @patch("aws_exe_sys.worker.run.fetch_code_s3")
     def test_no_environ_mutation(self, mock_fetch, mock_decrypt, mock_callback, mock_collect):
         """Verify run() does not mutate os.environ."""
         with tempfile.TemporaryDirectory() as tmpdir:

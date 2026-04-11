@@ -1,4 +1,4 @@
-"""Unit tests for src/common/bundler.py."""
+"""Unit tests for aws_exe_sys/common/bundler.py."""
 
 import os
 import tempfile
@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from src.common.bundler import OrderBundler
+from aws_exe_sys.common.bundler import OrderBundler
 
 
 class TestBuildEnv:
@@ -95,7 +95,7 @@ class TestSecretSources:
 
 
 class TestRepackage:
-    @patch("src.common.bundler.sops.repackage_order")
+    @patch("aws_exe_sys.common.bundler.sops.repackage_order")
     def test_calls_sops_with_full_env(self, mock_repackage):
         mock_repackage.return_value = "/tmp/code"
 
@@ -119,7 +119,7 @@ class TestRepackage:
             assert env_dict["TRACE_ID"] == "abc123"
             assert env_dict["RUN_ID"] == "run-1"
 
-    @patch("src.common.bundler.sops.repackage_order")
+    @patch("aws_exe_sys.common.bundler.sops.repackage_order")
     def test_writes_secrets_src(self, mock_repackage):
         with tempfile.TemporaryDirectory() as tmpdir:
             mock_repackage.return_value = tmpdir
@@ -137,7 +137,7 @@ class TestRepackage:
             assert "API_KEY" in lines
             assert "DB_PASS" in lines
 
-    @patch("src.common.bundler.sops.repackage_order")
+    @patch("aws_exe_sys.common.bundler.sops.repackage_order")
     def test_no_secrets_src_when_no_credentials(self, mock_repackage):
         with tempfile.TemporaryDirectory() as tmpdir:
             mock_repackage.return_value = tmpdir
@@ -148,7 +148,7 @@ class TestRepackage:
             secrets_src = os.path.join(tmpdir, "secrets.src")
             assert not os.path.exists(secrets_src)
 
-    @patch("src.common.bundler.sops.repackage_order")
+    @patch("aws_exe_sys.common.bundler.sops.repackage_order")
     def test_passes_sops_key(self, mock_repackage):
         with tempfile.TemporaryDirectory() as tmpdir:
             mock_repackage.return_value = tmpdir

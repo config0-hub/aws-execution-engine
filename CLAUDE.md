@@ -52,13 +52,17 @@ All env vars use the `AWS_EXE_SYS_` prefix:
 - `AWS_EXE_SYS_CODEBUILD_PROJECT` — CodeBuild project name
 - `AWS_EXE_SYS_WATCHDOG_SFN` — Watchdog Step Function ARN
 - `AWS_EXE_SYS_EVENTS_DIR` — Worker events directory (set at runtime)
+- `AWS_EXE_SYS_SSM_DOCUMENT` — SSM document name (used by orchestrator for SSM Run Command dispatch)
+- `AWS_EXE_SYS_EVENT_TTL_SECONDS` — order_events DynamoDB TTL in seconds, default `86400 * 90` (90 days)
+- `AWS_EXE_SYS_SSM_PREFIX` — SSM Parameter Store path prefix for SOPS keys, default `exe-sys`
+- `AWS_EXE_SYS_EVENT_SINKS` — comma-separated event sink names, default `dynamodb`
 
 ## Key Technical Decisions
 
 - **Single Docker image:** Based on `public.ecr.aws/lambda/python:3.14`. All Lambda functions use the same image with different `image_config.command` overrides. CodeBuild uses the default CMD (`entrypoint.sh`).
 - **Three execution targets:** Orders specify `execution_target` ("lambda", "codebuild", or "ssm"). Lambda for short tasks (<15 min), CodeBuild for long-running containerized tasks, SSM Run Command for executing on existing EC2 instances.
 - **SSM config provider:** Separate entry point (`POST /ssm`) for server configuration. Packages code (e.g. Ansible playbooks, shell scripts), uploads to S3, and dispatches via SSM SendCommand to EC2 instances. Tool-agnostic — the SSM document is a general command runner.
-- **SOPS key persistence:** Age keypair generated at repackage time. Private key stored in SSM Parameter Store (advanced tier with expiration policy). Workers retrieve via `SOPS_KEY_SSM_PATH`. Finalize cleans up SSM parameters.
+- **SOPS key persistence:** Age keypair generated at repackage time. Private key stored in SSM Parameter Store (advanced tier with expiration policy). Private key path format: `/{AWS_EXE_SYS_SSM_PREFIX}/sops-keys/{run_id}/{order_num}` (default prefix `exe-sys`). Workers retrieve via `SOPS_KEY_SSM_PATH`. Finalize cleans up SSM parameters.
 - **Cross-account execution:** No IAM role assumption at worker level. Target account credentials are fetched from SSM/Secrets Manager during repackage, encrypted into SOPS bundle, and unpacked as env vars at execution time.
 - **Git clone strategy:** HTTPS + token primary, SSH fallback. Credentials resolved from SSM paths once per job, shared across all clones.
 - **Worker callbacks:** Presigned S3 PUT URLs baked into SOPS bundle. Workers write `result.json` with status + logs. No DynamoDB write permissions needed on worker.
@@ -71,7 +75,7 @@ All env vars use the `AWS_EXE_SYS_` prefix:
 
 - **orders** — PK: `<run_id>:<order_num>`, GSI: `run_id-order_num-index` (PK: `run_id`, SK: `order_num`), TTL: 1 day
 - **order_events** — PK: `trace_id`, SK: `order_name:epoch`, GSI PK: `order_name`, GSI SK: `epoch`, TTL: 90 days. Job-level events use `_job` as order_name.
-- **orchestrator_locks** — PK: `lock:<run_id>`, TTL: max_timeout
+- **orchestrator_locks** — PK: `lock:<run_id>`, TTL: `3600` seconds (1 hour) by default, overridable via `acquire_lock(ttl=...)`
 
 ## S3 Buckets
 

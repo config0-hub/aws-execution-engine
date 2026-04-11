@@ -8,7 +8,7 @@ aws-exe-sys/
 │   └── workflows/
 │       └── deploy.yml                 # single workflow, all 6 steps
 │
-├── src/
+├── aws_exe_sys/
 │   ├── common/                        # shared libraries
 │   │   ├── __init__.py
 │   │   ├── models.py                  # job/order dataclasses
@@ -29,8 +29,7 @@ aws-exe-sys/
 │   │   ├── validate.py                # Step 1: validate all orders
 │   │   ├── repackage.py               # Step 2: SOPS + creds + presigned URL
 │   │   ├── upload.py                  # Step 3: upload exec.zip to S3
-│   │   ├── insert.py                  # Step 4: insert orders to DynamoDB
-│   │   └── pr_comment.py              # Step 5: init PR comment
+│   │   └── insert.py                  # Step 4: insert orders to DynamoDB
 │   │
 │   ├── orchestrator/                  # Part 2: execute_orders
 │   │   ├── __init__.py
@@ -39,7 +38,7 @@ aws-exe-sys/
 │   │   ├── read_state.py              # Step 1: read orders + S3 results
 │   │   ├── evaluate.py                # Step 2: dependency resolution
 │   │   ├── dispatch.py                # Step 3: invoke Lambda/CodeBuild/SSM + watchdog
-│   │   └── finalize.py                # Step 5: done endpoint + PR summary
+│   │   └── finalize.py                # Step 5: done endpoint + job summary
 │   │
 │   ├── watchdog_check/                # timeout safety net
 │   │   ├── __init__.py
@@ -131,19 +130,19 @@ All Lambda functions use the same ECR image with different `image_config.command
 
 | Function | Command Override | Timeout | Memory |
 |---|---|---|---|
-| init_job | `src.init_job.handler.handler` | 300s | 512MB |
-| orchestrator | `src.orchestrator.handler.handler` | 600s | 512MB |
-| watchdog_check | `src.watchdog_check.handler.handler` | 60s | 256MB |
-| worker | `src.worker.handler.handler` | 600s | 1024MB |
-| ssm_config | `src.ssm_config.handler.handler` | 300s | 512MB |
+| init_job | `aws_exe_sys.init_job.handler.handler` | 300s | 512MB |
+| orchestrator | `aws_exe_sys.orchestrator.handler.handler` | 600s | 512MB |
+| watchdog_check | `aws_exe_sys.watchdog_check.handler.handler` | 60s | 256MB |
+| worker | `aws_exe_sys.worker.handler.handler` | 600s | 1024MB |
+| ssm_config | `aws_exe_sys.ssm_config.handler.handler` | 300s | 512MB |
 
 CodeBuild uses the same image with the default `CMD` which runs `entrypoint.sh`.
 
 ```mermaid
 flowchart TB
     subgraph Entrypoints["Dual Entrypoints"]
-        CB["entrypoint.sh<br><i>CodeBuild CMD</i><br><i>→ python -m src.worker.run</i>"]
-        Lambda["handler.py<br><i>Lambda entrypoint</i><br><i>def handler(): → src.worker.run()</i>"]
+        CB["entrypoint.sh<br><i>CodeBuild CMD</i><br><i>→ python -m aws_exe_sys.worker.run</i>"]
+        Lambda["handler.py<br><i>Lambda entrypoint</i><br><i>def handler(): → aws_exe_sys.worker.run()</i>"]
     end
 
     subgraph RunPy["run.py — Shared Worker Logic"]
@@ -173,7 +172,7 @@ flowchart TB
 
 ## File Responsibilities
 
-### src/common/
+### aws_exe_sys/common/
 
 | File | Purpose |
 |---|---|
@@ -187,7 +186,7 @@ flowchart TB
 | `vcs/base.py` | ABC: create_comment, update_comment, find_comment_by_tag |
 | `vcs/github.py` | GitHub implementation: PR comments, CRUD, pagination |
 
-### src/init_job/
+### aws_exe_sys/init_job/
 
 | File | Purpose |
 |---|---|
@@ -196,9 +195,8 @@ flowchart TB
 | `repackage.py` | Fetch code + creds, encrypt with SOPS, generate presigned callback URL, re-zip |
 | `upload.py` | Upload exec.zip to S3, optional stripped copy |
 | `insert.py` | Insert all orders into DynamoDB orders table |
-| `pr_comment.py` | Post initial PR comment with order summary |
 
-### src/orchestrator/
+### aws_exe_sys/orchestrator/
 
 | File | Purpose |
 |---|---|
@@ -207,15 +205,15 @@ flowchart TB
 | `read_state.py` | Query orders table + check S3 for result.json files |
 | `evaluate.py` | Dependency resolution, determine ready/failed/waiting orders |
 | `dispatch.py` | Invoke Lambda, start CodeBuild, or send SSM Run Command; start watchdog SF, update status |
-| `finalize.py` | Write done endpoint, final PR comment, job-level order_event, release lock |
+| `finalize.py` | Write done endpoint, job-level order_event, release lock |
 
-### src/watchdog_check/
+### aws_exe_sys/watchdog_check/
 
 | File | Purpose |
 |---|---|
 | `handler.py` | Check if result.json exists in S3, write timed_out if timeout exceeded |
 
-### src/worker/
+### aws_exe_sys/worker/
 
 | File | Purpose |
 |---|---|
@@ -224,7 +222,7 @@ flowchart TB
 | `run.py` | Fetch exec.zip, unpack SOPS, execute cmds, capture stdout/stderr |
 | `callback.py` | PUT result.json to presigned S3 URL |
 
-### src/ssm_config/
+### aws_exe_sys/ssm_config/
 
 | File | Purpose |
 |---|---|

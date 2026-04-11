@@ -1,9 +1,9 @@
-"""Unit tests for src/ssm_config/validate.py."""
+"""Unit tests for aws_exe_sys/ssm_config/validate.py."""
 
 import pytest
 
-from src.common.models import SsmJob, SsmOrder
-from src.ssm_config.validate import validate_ssm_orders
+from aws_exe_sys.common.models import SsmJob, SsmOrder
+from aws_exe_sys.ssm_config.validate import validate_ssm_orders
 
 
 def _make_job(orders=None, **kwargs):

@@ -1,4 +1,4 @@
-"""Unit tests for src/init_job/upload.py."""
+"""Unit tests for aws_exe_sys/init_job/upload.py."""
 
 import os
 import tempfile
@@ -7,7 +7,7 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from src.init_job.upload import upload_orders
+from aws_exe_sys.init_job.upload import upload_orders
 
 
 @pytest.fixture

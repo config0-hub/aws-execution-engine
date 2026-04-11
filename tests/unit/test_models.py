@@ -1,10 +1,10 @@
-"""Unit tests for src/common/models.py."""
+"""Unit tests for aws_exe_sys/common/models.py."""
 
 import json
 import base64
 from dataclasses import dataclass
 
-from src.common.models import (
+from aws_exe_sys.common.models import (
     DictMixin,
     BaseOrder,
     BaseJob,

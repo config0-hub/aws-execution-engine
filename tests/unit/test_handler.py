@@ -1,4 +1,4 @@
-"""Unit tests for src/init_job/handler.py."""
+"""Unit tests for aws_exe_sys/init_job/handler.py."""
 
 import base64
 import json
@@ -6,9 +6,9 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from src.common.models import Job, Order
-from src.common.lambda_handler import normalize_event
-from src.init_job.handler import handler, process_job_and_insert_orders
+from aws_exe_sys.common.models import Job, Order
+from aws_exe_sys.common.lambda_handler import normalize_event
+from aws_exe_sys.init_job.handler import handler, process_job_and_insert_orders
 
 
 def _make_job_b64(**kwargs):
@@ -68,7 +68,7 @@ class TestHandlerDirectInvoke:
         assert "Missing" in resp["error"]
         assert "statusCode" not in resp  # not wrapped
 
-    @patch("src.init_job.handler.process_job_and_insert_orders")
+    @patch("aws_exe_sys.init_job.handler.process_job_and_insert_orders")
     def test_valid_request_returns_ok(self, mock_process):
         mock_process.return_value = {
             "status": "ok",
@@ -84,7 +84,7 @@ class TestHandlerDirectInvoke:
         assert resp["run_id"] == "run-1"
         assert "statusCode" not in resp
 
-    @patch("src.init_job.handler.process_job_and_insert_orders")
+    @patch("aws_exe_sys.init_job.handler.process_job_and_insert_orders")
     def test_exception_returns_error(self, mock_process):
         mock_process.side_effect = RuntimeError("boom")
 
@@ -97,7 +97,7 @@ class TestHandlerDirectInvoke:
 # ── handler (SNS) ────────────────────────────────────────────────
 
 class TestHandlerSNS:
-    @patch("src.init_job.handler.process_job_and_insert_orders")
+    @patch("aws_exe_sys.init_job.handler.process_job_and_insert_orders")
     def test_sns_event_processed(self, mock_process):
         mock_process.return_value = {"status": "ok", "run_id": "r1"}
 
@@ -111,7 +111,7 @@ class TestHandlerSNS:
 # ── handler (API Gateway) ────────────────────────────────────────
 
 class TestHandlerAPIGateway:
-    @patch("src.init_job.handler.process_job_and_insert_orders")
+    @patch("aws_exe_sys.init_job.handler.process_job_and_insert_orders")
     def test_apigw_post_returns_200(self, mock_process):
         mock_process.return_value = {"status": "ok", "run_id": "r1"}
 
@@ -134,7 +134,7 @@ class TestHandlerAPIGateway:
         body = json.loads(resp["body"])
         assert "Missing" in body["error"]
 
-    @patch("src.init_job.handler.process_job_and_insert_orders")
+    @patch("aws_exe_sys.init_job.handler.process_job_and_insert_orders")
     def test_apigw_error_returns_400(self, mock_process):
         mock_process.return_value = {"status": "error", "errors": ["bad"]}
 
@@ -143,7 +143,7 @@ class TestHandlerAPIGateway:
         resp = handler(event)
         assert resp["statusCode"] == 400
 
-    @patch("src.init_job.handler.process_job_and_insert_orders")
+    @patch("aws_exe_sys.init_job.handler.process_job_and_insert_orders")
     def test_apigw_exception_returns_500(self, mock_process):
         mock_process.side_effect = RuntimeError("crash")
 
@@ -156,11 +156,11 @@ class TestHandlerAPIGateway:
 
 
 class TestProcessJobAndInsertOrders:
-    @patch("src.init_job.handler.s3_ops.write_init_trigger")
-    @patch("src.init_job.handler.insert_orders")
-    @patch("src.init_job.handler.upload_orders")
-    @patch("src.init_job.handler.repackage_orders")
-    @patch("src.init_job.handler.validate_orders")
+    @patch("aws_exe_sys.init_job.handler.s3_ops.write_init_trigger")
+    @patch("aws_exe_sys.init_job.handler.insert_orders")
+    @patch("aws_exe_sys.init_job.handler.upload_orders")
+    @patch("aws_exe_sys.init_job.handler.repackage_orders")
+    @patch("aws_exe_sys.init_job.handler.validate_orders")
     def test_full_flow(
         self, mock_validate, mock_repackage, mock_upload,
         mock_insert, mock_trigger, monkeypatch,

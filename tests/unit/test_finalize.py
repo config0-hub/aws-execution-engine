@@ -1,4 +1,4 @@
-"""Unit tests for src/orchestrator/finalize.py."""
+"""Unit tests for aws_exe_sys/orchestrator/finalize.py."""
 
 import json
 
@@ -6,9 +6,9 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from src.common import dynamodb
-from src.common.models import SUCCEEDED, FAILED, TIMED_OUT, JOB_ORDER_NAME
-from src.orchestrator.finalize import check_and_finalize
+from aws_exe_sys.common import dynamodb
+from aws_exe_sys.common.models import SUCCEEDED, FAILED, TIMED_OUT, JOB_ORDER_NAME
+from aws_exe_sys.orchestrator.finalize import check_and_finalize
 
 
 @pytest.fixture

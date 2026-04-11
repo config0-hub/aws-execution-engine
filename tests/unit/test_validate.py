@@ -1,9 +1,9 @@
-"""Unit tests for src/init_job/validate.py."""
+"""Unit tests for aws_exe_sys/init_job/validate.py."""
 
 import pytest
 
-from src.common.models import Job, Order
-from src.init_job.validate import validate_orders
+from aws_exe_sys.common.models import Job, Order
+from aws_exe_sys.init_job.validate import validate_orders
 
 
 def _make_job(orders=None, **kwargs):

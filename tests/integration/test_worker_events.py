@@ -64,8 +64,8 @@ def mock_aws_resources(aws_env):
 @pytest.mark.integration
 class TestWorkerEvents:
 
-    @patch("src.worker.run.send_callback")
-    @patch("src.common.sops.decrypt_env")
+    @patch("aws_exe_sys.worker.run.send_callback")
+    @patch("aws_exe_sys.common.sops.decrypt_env")
     def test_subprocess_events_reach_dynamodb(
         self, mock_sops_decrypt, mock_callback, mock_aws_resources,
     ):
@@ -103,7 +103,7 @@ class TestWorkerEvents:
                 Body=buf.read(),
             )
 
-        from src.worker.run import run
+        from aws_exe_sys.worker.run import run
         status = run("s3://test-internal/tmp/exec/run-evt-1/0001/exec.zip")
 
         assert status == "succeeded"
@@ -128,8 +128,8 @@ class TestWorkerEvents:
         mock_callback.assert_called_once()
         assert mock_callback.call_args[0][1] == "succeeded"
 
-    @patch("src.worker.run.send_callback")
-    @patch("src.common.sops.decrypt_env")
+    @patch("aws_exe_sys.worker.run.send_callback")
+    @patch("aws_exe_sys.common.sops.decrypt_env")
     def test_no_events_written_when_subprocess_writes_nothing(
         self, mock_sops_decrypt, mock_callback, mock_aws_resources,
     ):
@@ -158,7 +158,7 @@ class TestWorkerEvents:
                 Body=buf.read(),
             )
 
-        from src.worker.run import run
+        from aws_exe_sys.worker.run import run
         status = run("s3://test-internal/tmp/exec/run-no-evt/0001/exec.zip")
 
         assert status == "succeeded"

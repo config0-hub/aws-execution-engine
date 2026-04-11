@@ -1,4 +1,4 @@
-"""Unit tests for src/orchestrator/read_state.py."""
+"""Unit tests for aws_exe_sys/orchestrator/read_state.py."""
 
 import json
 
@@ -6,9 +6,9 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from src.common import dynamodb
-from src.common.models import RUNNING, SUCCEEDED, QUEUED
-from src.orchestrator.read_state import read_state
+from aws_exe_sys.common import dynamodb
+from aws_exe_sys.common.models import RUNNING, SUCCEEDED, QUEUED
+from aws_exe_sys.orchestrator.read_state import read_state
 
 
 @pytest.fixture
@@ -93,11 +93,13 @@ class TestReadState:
             "order_num": "0001",
         }, dynamodb_resource=ddb)
 
-        # Write a result.json to S3
+        # Write a result.json to S3 (must include schema_version per ResultV1)
         s3.put_object(
             Bucket="test-internal",
             Key="tmp/callbacks/runs/run-1/0001/result.json",
-            Body=json.dumps({"status": "succeeded", "log": "done"}).encode(),
+            Body=json.dumps(
+                {"status": "succeeded", "log": "done", "schema_version": "v1"}
+            ).encode(),
         )
 
         orders = read_state(
@@ -124,7 +126,9 @@ class TestReadState:
         s3.put_object(
             Bucket="test-internal",
             Key="tmp/callbacks/runs/run-1/0001/result.json",
-            Body=json.dumps({"status": "succeeded", "log": "ok"}).encode(),
+            Body=json.dumps(
+                {"status": "succeeded", "log": "ok", "schema_version": "v1"}
+            ).encode(),
         )
 
         read_state(
@@ -152,7 +156,9 @@ class TestReadState:
         s3.put_object(
             Bucket="test-internal",
             Key="tmp/callbacks/runs/run-1/0001/result.json",
-            Body=json.dumps({"status": "succeeded", "log": "ok"}).encode(),
+            Body=json.dumps(
+                {"status": "succeeded", "log": "ok", "schema_version": "v1"}
+            ).encode(),
         )
 
         read_state(

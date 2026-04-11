@@ -8,9 +8,9 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from src.common.models import QUEUED, RUNNING, SUCCEEDED, FAILED, TIMED_OUT, JOB_ORDER_NAME
-from src.orchestrator.handler import handler as orch_handler
-from src.watchdog_check.handler import handler as watchdog_handler
+from aws_exe_sys.common.models import QUEUED, RUNNING, SUCCEEDED, FAILED, TIMED_OUT, JOB_ORDER_NAME
+from aws_exe_sys.orchestrator.handler import handler as orch_handler
+from aws_exe_sys.watchdog_check.handler import handler as watchdog_handler
 
 
 # ── Fixtures ──────────────────────────────────────────────────────

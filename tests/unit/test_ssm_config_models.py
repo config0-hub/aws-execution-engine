@@ -1,9 +1,9 @@
-"""Unit tests for src/ssm_config/models.py."""
+"""Unit tests for aws_exe_sys/ssm_config/models.py."""
 
 import json
 import base64
 
-from src.common.models import SsmOrder, SsmJob
+from aws_exe_sys.common.models import SsmOrder, SsmJob
 
 
 class TestSsmOrder:

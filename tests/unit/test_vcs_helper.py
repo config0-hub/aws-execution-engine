@@ -1,12 +1,12 @@
-"""Unit tests for src/common/vcs/helper.py — VcsHelper facade."""
+"""Unit tests for aws_exe_sys/common/vcs/helper.py — VcsHelper facade."""
 
 import json
 
 import pytest
 import responses
 
-from src.common.vcs.helper import VcsHelper
-from src.common.vcs.github import GITHUB_API_BASE
+from aws_exe_sys.common.vcs.helper import VcsHelper
+from aws_exe_sys.common.vcs.github import GITHUB_API_BASE
 
 
 @pytest.fixture
@@ -22,7 +22,7 @@ def vcs():
 class TestVcsHelperInit:
     def test_github_provider(self):
         vcs = VcsHelper(provider="github")
-        from src.common.vcs.github import GitHubProvider
+        from aws_exe_sys.common.vcs.github import GitHubProvider
         assert isinstance(vcs.provider, GitHubProvider)
 
     def test_unknown_provider_raises(self):
@@ -31,7 +31,7 @@ class TestVcsHelperInit:
 
     def test_default_is_github(self):
         vcs = VcsHelper()
-        from src.common.vcs.github import GitHubProvider
+        from aws_exe_sys.common.vcs.github import GitHubProvider
         assert isinstance(vcs.provider, GitHubProvider)
 
 

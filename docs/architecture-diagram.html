@@ -1046,7 +1046,7 @@
         </div>
         <div class="design-item">
           <div class="design-label">SOPS Encryption</div>
-          <div class="design-desc">Target account credentials are fetched from SSM/Secrets Manager during repackage, encrypted with SOPS (age key) into exec.zip. The SOPS private key is stored in SSM Parameter Store as SecureString at /aws-exe-sys/sops-keys/&lt;run_id&gt;/&lt;order_num&gt;. Workers fetch the key from SSM to decrypt. Keys are cleaned up during finalization. Never stored in DynamoDB.</div>
+          <div class="design-desc">Target account credentials are fetched from SSM/Secrets Manager during repackage, encrypted with SOPS (age key) into exec.zip. The SOPS private key is stored in SSM Parameter Store as SecureString at /exe-sys/sops-keys/&lt;run_id&gt;/&lt;order_num&gt;. Workers fetch the key from SSM to decrypt. Keys are cleaned up during finalization. Never stored in DynamoDB.</div>
         </div>
       </div>
     </div>

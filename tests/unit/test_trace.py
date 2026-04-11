@@ -1,8 +1,8 @@
-"""Unit tests for src/common/trace.py."""
+"""Unit tests for aws_exe_sys/common/trace.py."""
 
 import time
 
-from src.common.trace import generate_trace_id, create_leg, parse_leg
+from aws_exe_sys.common.trace import generate_trace_id, create_leg, parse_leg
 
 
 class TestGenerateTraceId:

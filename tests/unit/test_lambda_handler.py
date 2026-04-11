@@ -1,9 +1,9 @@
-"""Unit tests for src/common/lambda_handler.py."""
+"""Unit tests for aws_exe_sys/common/lambda_handler.py."""
 
 import json
 from unittest.mock import MagicMock
 
-from src.common.lambda_handler import normalize_event, apigw_response, lambda_handler
+from aws_exe_sys.common.lambda_handler import normalize_event, apigw_response, lambda_handler
 
 
 # ── normalize_event ─────────────────────────────────────────────────

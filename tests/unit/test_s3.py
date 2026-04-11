@@ -1,4 +1,4 @@
-"""Unit tests for src/common/s3.py using moto."""
+"""Unit tests for aws_exe_sys/common/s3.py using moto."""
 
 import json
 import os
@@ -9,7 +9,7 @@ import pytest
 from moto import mock_aws
 from unittest.mock import patch, MagicMock
 
-from src.common import s3
+from aws_exe_sys.common import s3
 
 
 @pytest.fixture
@@ -71,7 +71,9 @@ class TestPresignedUrl:
 class TestReadResult:
     def test_read_existing_result(self, s3_client):
         key = "tmp/callbacks/runs/run-1/001/result.json"
-        payload = json.dumps({"status": "succeeded", "log": "all good"})
+        payload = json.dumps(
+            {"status": "succeeded", "log": "all good", "schema_version": "v1"}
+        )
         s3_client.put_object(Bucket="test-internal", Key=key, Body=payload)
 
         result = s3.read_result(
@@ -79,8 +81,9 @@ class TestReadResult:
             s3_client=s3_client,
         )
         assert result is not None
-        assert result["status"] == "succeeded"
-        assert result["log"] == "all good"
+        assert result.status == "succeeded"
+        assert result.log == "all good"
+        assert result.schema_version == "v1"
 
     def test_read_nonexistent_result(self, s3_client):
         result = s3.read_result(

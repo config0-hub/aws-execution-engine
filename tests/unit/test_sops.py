@@ -1,4 +1,4 @@
-"""Unit tests for src/common/sops.py with mocked subprocess calls."""
+"""Unit tests for aws_exe_sys/common/sops.py with mocked subprocess calls."""
 
 import json
 import os
@@ -6,12 +6,14 @@ import tempfile
 from unittest.mock import patch, MagicMock
 
 import pytest
+from botocore.exceptions import ClientError
 
-from src.common import sops
+from aws_exe_sys.common import sops
+from aws_exe_sys.common.sops import SopsKeyExpired, fetch_sops_key_ssm
 
 
 class TestEncryptEnv:
-    @patch("src.common.sops._run_cmd")
+    @patch("aws_exe_sys.common.sops._run_cmd")
     def test_encrypt_with_provided_key(self, mock_run_cmd):
         mock_run_cmd.return_value = ""
 
@@ -26,8 +28,8 @@ class TestEncryptEnv:
         assert "--encrypt" in call_args
         assert "--age" in call_args
 
-    @patch("src.common.sops._generate_age_key")
-    @patch("src.common.sops._run_cmd")
+    @patch("aws_exe_sys.common.sops._generate_age_key")
+    @patch("aws_exe_sys.common.sops._run_cmd")
     def test_encrypt_auto_gen_key(self, mock_run_cmd, mock_gen_key):
         mock_gen_key.return_value = ("age1publickey", "AGE-SECRET-KEY-CONTENT", "/tmp/test.key")
         mock_run_cmd.return_value = ""
@@ -38,7 +40,7 @@ class TestEncryptEnv:
 
 
 class TestDecryptEnv:
-    @patch("src.common.sops._run_cmd")
+    @patch("aws_exe_sys.common.sops._run_cmd")
     def test_decrypt_with_key_string(self, mock_run_cmd):
         mock_run_cmd.return_value = json.dumps({"KEY1": "val1", "KEY2": "val2"})
 
@@ -47,7 +49,7 @@ class TestDecryptEnv:
         call_args = mock_run_cmd.call_args[0][0]
         assert "--decrypt" in call_args
 
-    @patch("src.common.sops._run_cmd")
+    @patch("aws_exe_sys.common.sops._run_cmd")
     @patch("os.path.isfile", return_value=True)
     def test_decrypt_with_key_file(self, mock_isfile, mock_run_cmd):
         mock_run_cmd.return_value = json.dumps({"KEY": "val"})
@@ -60,7 +62,7 @@ class TestDecryptEnv:
 
 
 class TestRepackageOrder:
-    @patch("src.common.sops.encrypt_env")
+    @patch("aws_exe_sys.common.sops.encrypt_env")
     def test_repackage_creates_files(self, mock_encrypt):
         with tempfile.TemporaryDirectory() as tmpdir:
             enc_file = os.path.join(tmpdir, "mock_enc.json")
@@ -86,7 +88,7 @@ class TestRepackageOrder:
             assert "APP_ENV" in lines
             assert "DB_PASS" in lines
 
-    @patch("src.common.sops.encrypt_env")
+    @patch("aws_exe_sys.common.sops.encrypt_env")
     def test_repackage_passes_all_env_vars_to_encrypt(self, mock_encrypt):
         with tempfile.TemporaryDirectory() as tmpdir:
             enc_file = os.path.join(tmpdir, "mock_enc.json")
@@ -120,3 +122,48 @@ class TestRunCmd:
         )
         with pytest.raises(RuntimeError, match="Command failed"):
             sops._run_cmd(["bad", "cmd"])
+
+
+class TestFetchSopsKeySsm:
+    """Tests for fetch_sops_key_ssm — domain exception on expired/missing key."""
+
+    @patch("aws_exe_sys.common.sops.boto3.client")
+    def test_success_returns_value(self, mock_client_factory):
+        mock_ssm = MagicMock()
+        mock_client_factory.return_value = mock_ssm
+        mock_ssm.get_parameter.return_value = {
+            "Parameter": {"Value": "AGE-SECRET-KEY-1ABC"}
+        }
+
+        result = fetch_sops_key_ssm("/aws-exe-sys/sops-keys/run-1/000")
+
+        assert result == "AGE-SECRET-KEY-1ABC"
+        mock_ssm.get_parameter.assert_called_once_with(
+            Name="/aws-exe-sys/sops-keys/run-1/000", WithDecryption=True
+        )
+
+    @patch("aws_exe_sys.common.sops.boto3.client")
+    def test_raises_domain_error_on_missing(self, mock_client_factory):
+        """When the SSM parameter has been expired by the tier policy and
+        swept by SSM, get_parameter raises ParameterNotFound. We convert that
+        to a SopsKeyExpired domain exception so the worker can respond with
+        a fast, specific callback instead of a generic crash.
+        """
+        mock_ssm = MagicMock()
+        mock_client_factory.return_value = mock_ssm
+
+        # Simulate the botocore exception class that boto3 attaches to the
+        # client under ssm.exceptions.ParameterNotFound.
+        class ParameterNotFound(ClientError):
+            pass
+
+        mock_ssm.exceptions.ParameterNotFound = ParameterNotFound
+        mock_ssm.get_parameter.side_effect = ParameterNotFound(
+            {"Error": {"Code": "ParameterNotFound", "Message": "Parameter not found."}},
+            "GetParameter",
+        )
+
+        with pytest.raises(SopsKeyExpired) as exc:
+            fetch_sops_key_ssm("/aws-exe-sys/sops-keys/run-expired/000")
+
+        assert "/aws-exe-sys/sops-keys/run-expired/000" in str(exc.value)

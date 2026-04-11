@@ -1,13 +1,13 @@
-"""Unit tests for src/orchestrator/dispatch.py."""
+"""Unit tests for aws_exe_sys/orchestrator/dispatch.py."""
 
 import boto3
 import pytest
 from moto import mock_aws
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
-from src.common import dynamodb
-from src.common.models import RUNNING
-from src.orchestrator.dispatch import dispatch_orders, _dispatch_single
+from aws_exe_sys.common import dynamodb
+from aws_exe_sys.common.models import RUNNING
+from aws_exe_sys.orchestrator.dispatch import dispatch_orders, _dispatch_single
 
 
 @pytest.fixture
@@ -50,8 +50,8 @@ def ddb_resource(aws_env):
 
 
 class TestDispatchSingle:
-    @patch("src.orchestrator.dispatch._start_watchdog")
-    @patch("src.orchestrator.dispatch._dispatch_lambda")
+    @patch("aws_exe_sys.orchestrator.dispatch._start_watchdog")
+    @patch("aws_exe_sys.orchestrator.targets.lambda_target.LambdaTarget.dispatch")
     def test_lambda_dispatch(self, mock_lambda, mock_watchdog, ddb_resource):
         mock_lambda.return_value = "req-123"
         mock_watchdog.return_value = "arn:sfn:exec-1"
@@ -82,8 +82,8 @@ class TestDispatchSingle:
         updated = dynamodb.get_order("run-1", "0001", dynamodb_resource=ddb_resource)
         assert updated["status"] == RUNNING
 
-    @patch("src.orchestrator.dispatch._start_watchdog")
-    @patch("src.orchestrator.dispatch._dispatch_codebuild")
+    @patch("aws_exe_sys.orchestrator.dispatch._start_watchdog")
+    @patch("aws_exe_sys.orchestrator.targets.codebuild.CodeBuildTarget.dispatch")
     def test_codebuild_dispatch(self, mock_cb, mock_watchdog, ddb_resource):
         mock_cb.return_value = "build-123"
         mock_watchdog.return_value = "arn:sfn:exec-2"
@@ -108,8 +108,8 @@ class TestDispatchSingle:
         assert result["execution_id"] == "build-123"
         mock_cb.assert_called_once()
 
-    @patch("src.orchestrator.dispatch._start_watchdog")
-    @patch("src.orchestrator.dispatch._dispatch_ssm")
+    @patch("aws_exe_sys.orchestrator.dispatch._start_watchdog")
+    @patch("aws_exe_sys.orchestrator.targets.ssm.SsmTarget.dispatch")
     def test_ssm_dispatch(self, mock_ssm, mock_watchdog, ddb_resource):
         mock_ssm.return_value = "cmd-123"
         mock_watchdog.return_value = "arn:sfn:exec-3"
@@ -143,8 +143,8 @@ class TestDispatchSingle:
 
 
 class TestDispatchOrders:
-    @patch("src.orchestrator.dispatch._start_watchdog")
-    @patch("src.orchestrator.dispatch._dispatch_lambda")
+    @patch("aws_exe_sys.orchestrator.dispatch._start_watchdog")
+    @patch("aws_exe_sys.orchestrator.targets.lambda_target.LambdaTarget.dispatch")
     def test_parallel_dispatch(self, mock_lambda, mock_watchdog, ddb_resource):
         mock_lambda.return_value = "req-id"
         mock_watchdog.return_value = "arn:sfn"

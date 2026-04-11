@@ -40,7 +40,7 @@ Status: Final (aligned with ACTION3.md)
   "order_name": "string",            // optional -- auto-generated if missing
   "cmds": ["string"],                // required -- non-empty list of commands
   "timeout": int,                    // required -- positive seconds
-  "execution_target": "lambda|codebuild|ssm",  // required
+  "execution_target": "lambda|codebuild|ssm",  // required -- one of "lambda", "codebuild", or "ssm"
   "git_folder": "string",            // optional -- subdirectory for checkout
   "must_succeed": bool,              // optional -- default true
   "queue_id": "string",              // optional -- for serialization
@@ -97,14 +97,20 @@ Status: Final (aligned with ACTION3.md)
 ### Table
 - Name: provided via Terraform output (consumer reads from env var)
 - Partition key: `trace_id` (String)
-- Sort key: `sk` (String, format: "{order_name}:{epoch}")
+- Sort key: `sk` (String). The literal format produced by `put_event()` is:
+
+  ```python
+  sk = "{order_name}:{epoch}:{event_type}"
+  ```
+
+  `:event_type` is load-bearing: two events within the same epoch (e.g., a `tf_plan` and a `tf_validate` emitted in the same second) would otherwise collide on the same PK+SK and one would overwrite the other.
 - GSI: `order_name` (HASH) + `epoch` (RANGE) -- for per-order queries
 
 ### Event Record Schema
 ```json
 {
   "trace_id": "string",              // partition key
-  "sk": "order_name:epoch",          // sort key
+  "sk": "order_name:epoch:event_type", // sort key
   "order_name": "string",
   "epoch": "string",
   "event_type": "string",            // e.g., "tf_plan", "tf_validate", "tfsec"

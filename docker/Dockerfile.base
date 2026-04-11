@@ -10,11 +10,11 @@ COPY docker/age-keygen /usr/local/bin/age-keygen
 COPY docker/tofu /usr/local/bin/tofu
 RUN chmod +x /usr/local/bin/sops /usr/local/bin/age /usr/local/bin/age-keygen /usr/local/bin/tofu
 
-# Python dependencies ONLY (no proprietary src/)
+# Python dependencies ONLY (no proprietary aws_exe_sys/)
 COPY requirements.txt /tmp/
 RUN pip install -r /tmp/requirements.txt && rm /tmp/requirements.txt
 
 # Bootstrap handler (generic, no proprietary code)
-COPY src/bootstrap_handler.py ${LAMBDA_TASK_ROOT}/
+COPY aws_exe_sys/bootstrap_handler.py ${LAMBDA_TASK_ROOT}/
 
 CMD ["bootstrap_handler.handler"]

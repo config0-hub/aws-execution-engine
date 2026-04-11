@@ -2,7 +2,7 @@
 
 ## System Overview
 
-aws-exe-sys is a generic, event-driven execution system. It receives jobs containing orders, queues them, and executes them via AWS Lambda, CodeBuild, or SSM Run Command with dependency resolution, cross-account credential management, and VCS PR tracking.
+aws-exe-sys is a generic, event-driven execution system. It receives jobs containing orders, queues them, and executes them via AWS Lambda, CodeBuild, or SSM Run Command with dependency resolution and cross-account credential management. A VCS helper library (`aws_exe_sys/common/vcs/`) is exposed for callers that want to post PR comments themselves — the engine does not post any.
 
 The system is split into three flows:
 
@@ -13,6 +13,8 @@ The system is split into three flows:
 ---
 
 ## Part 1: init_job Lambda
+
+> **PR comments are the caller's responsibility.** The engine exposes `aws_exe_sys/common/vcs/` as a library for callers that need it, but does not post comments itself. `init_job` no longer writes an initial PR comment, and `finalize` no longer writes a final one — callers that want PR comment tracking drive it from their own trigger/orchestration layer using the helpers in `aws_exe_sys/common/vcs/`.
 
 ### Upstream
 
@@ -98,7 +100,7 @@ flowchart TB
     Presign["Generate presigned S3 PUT URL<br><i>for worker callback</i>"]
     Merge["Merge all with env_vars"]
     SOPS["Encrypt with SOPS<br><i>auto-gen age key if none provided</i>"]
-    SSMStore["Store SOPS private key in SSM<br><i>/aws-exe-sys/sops-keys/&lt;run_id&gt;/&lt;order_num&gt;</i><br><i>SecureString</i>"]
+    SSMStore["Store SOPS private key in SSM<br><i>/exe-sys/sops-keys/&lt;run_id&gt;/&lt;order_num&gt;</i><br><i>SecureString</i>"]
     Write["Write env_vars.env + secrets.src<br>Re-zip tarball"]
 
     Start --> Code --> Creds --> Presign --> Merge --> SOPS --> SSMStore --> Write
@@ -139,20 +141,7 @@ flowchart LR
     style Fields fill:#0a3544,stroke:#06b6d4,color:#e2e8f0
 ```
 
-**Step 5: Init PR Comment**
-
-```mermaid
-flowchart LR
-    VCS["VcsPrHelper<br><i>Post initial PR comment</i>"]
-    Comment["PR Comment Body<br><i>#search_tag · #run_id · #flow_id</i><br><i>Order Summary:</i><br><i>order-1: queued · order-2: queued · ...</i>"]
-
-    VCS --> Comment
-
-    style VCS fill:#0a3544,stroke:#06b6d4,color:#e2e8f0
-    style Comment fill:#003d2b,stroke:#10b981,color:#e2e8f0
-```
-
-**Step 6: Kick Off Orchestrator**
+**Step 5: Kick Off Orchestrator**
 
 ```mermaid
 flowchart LR
@@ -171,7 +160,7 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    Resp["HTTP 200/400<br><i>run_id · trace_id · flow_id</i><br><i>done_endpt · pr_search_tag</i><br><i>init_pr_comment</i>"]
+    Resp["HTTP 200/400<br><i>run_id · trace_id · flow_id</i><br><i>done_endpt · pr_search_tag</i>"]
 
     style Resp fill:#003d2b,stroke:#10b981,color:#e2e8f0
 ```
@@ -281,7 +270,6 @@ flowchart LR
 
 **Key differences from init_job:**
 - No SOPS encryption — env vars and credentials are passed as plain SSM command parameters
-- No PR comment step — SSM orders are typically infrastructure-level, not PR-driven
 - Uses `SsmJob`/`SsmOrder` models with SSM-specific fields (`ssm_targets`, `ssm_document_name`)
 - Orders always get `execution_target: "ssm"` in DynamoDB
 
@@ -340,7 +328,7 @@ flowchart TB
     Query["Query DynamoDB orders<br><i>all orders for &lt;run_id&gt;:*</i>"]
     CheckS3["Check S3 for callbacks<br><i>tmp/callbacks/runs/&lt;run_id&gt;/&lt;order_num&gt;/result.json</i>"]
     Parse["For each new result.json<br><i>parse status + log</i>"]
-    Update["Update orders table status<br>Write to order_events<br>Update PR comment"]
+    Update["Update orders table status<br>Write to order_events"]
 
     Query --> CheckS3 --> Parse --> Update
 
@@ -384,21 +372,18 @@ flowchart TB
     Lambda["Invoke worker Lambda"]
     CB["Start CodeBuild project"]
     SSMCmd["Send SSM Run Command"]
-    Compat["Backward compat<br><i>use_lambda=true → lambda</i><br><i>use_lambda=false → codebuild</i>"]
-    Post["Start watchdog Step Function<br>Update status → running<br>Write order_event: dispatched<br>Update PR comment"]
+    Post["Start watchdog Step Function<br>Update status → running<br>Write order_event: dispatched"]
 
     Ready --> Target
     Target -- "lambda" --> Lambda --> Post
     Target -- "codebuild" --> CB --> Post
     Target -- "ssm" --> SSMCmd --> Post
-    Target -. "use_lambda fallback" .-> Compat
 
     style Ready fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
     style Target fill:#3d2b00,stroke:#eab308,color:#e2e8f0
     style Lambda fill:#3d1f00,stroke:#f97316,color:#e2e8f0
     style CB fill:#2d1052,stroke:#a855f7,color:#e2e8f0
     style SSMCmd fill:#3d2b00,stroke:#eab308,color:#e2e8f0
-    style Compat fill:#0a3544,stroke:#06b6d4,color:#e2e8f0
     style Post fill:#003d2b,stroke:#10b981,color:#e2e8f0
 ```
 
@@ -424,14 +409,12 @@ flowchart LR
 flowchart TB
     Event["Write job-level order_event<br><i>_job:epoch</i><br><i>status · done_endpt · summary</i>"]
     Done["Write done endpoint<br><i>s3://done-bucket/&lt;run_id&gt;/done</i>"]
-    PR["Final PR comment<br><i>full summary</i>"]
     Lock["Release lock<br><i>status → completed</i>"]
 
-    Event --> Done --> PR --> Lock
+    Event --> Done --> Lock
 
     style Event fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
     style Done fill:#003d2b,stroke:#10b981,color:#e2e8f0
-    style PR fill:#0a3544,stroke:#06b6d4,color:#e2e8f0
     style Lock fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
 ```
 
@@ -463,7 +446,7 @@ Same code runs in Lambda and CodeBuild Docker container.
 ```mermaid
 flowchart TB
     Fetch["1. Fetch exec.zip from S3"]
-    SSM["2. Fetch SOPS private key from SSM<br><i>/aws-exe-sys/sops-keys/&lt;run_id&gt;/&lt;order_num&gt;</i>"]
+    SSM["2. Fetch SOPS private key from SSM<br><i>/exe-sys/sops-keys/&lt;run_id&gt;/&lt;order_num&gt;</i>"]
     Decrypt["3. Decrypt SOPS → env vars<br><i>AWS creds · custom env vars · CALLBACK_URL</i>"]
     Run["4. Run cmds<br><i>os.system / subprocess.Popen, no buffering</i>"]
     Capture["5. Capture exit code + stdout/stderr"]
@@ -481,7 +464,7 @@ flowchart TB
     style S3Event fill:#003d2b,stroke:#10b981,color:#e2e8f0
 ```
 
-No IAM role switching. Worker only operates with target account credentials from SOPS. Worker needs ssm:GetParameter on /aws-exe-sys/sops-keys/* to fetch the decryption key. Callback uses presigned URL (no additional AWS permissions needed).
+No IAM role switching. Worker only operates with target account credentials from SOPS. Worker needs ssm:GetParameter on /exe-sys/sops-keys/* to fetch the decryption key. Callback uses presigned URL (no additional AWS permissions needed).
 
 ---
 
@@ -569,7 +552,7 @@ flowchart TB
     subgraph Repackage["Repackage Step (init_job)"]
         Fetch["Fetch from SSM / Secrets Manager<br><i>target account temp creds</i><br><i>+ env_vars + presigned callback URL</i>"]
         Encrypt["Encrypt all via SOPS (age key)<br><i>→ packed into exec.zip</i>"]
-        Store["Store SOPS private key in SSM<br><i>/aws-exe-sys/sops-keys/&lt;run_id&gt;/&lt;order_num&gt;</i><br><i>SecureString</i>"]
+        Store["Store SOPS private key in SSM<br><i>/exe-sys/sops-keys/&lt;run_id&gt;/&lt;order_num&gt;</i><br><i>SecureString</i>"]
     end
 
     subgraph Worker["Worker Execution"]
@@ -731,7 +714,7 @@ graph LR
 graph TB
     subgraph Format["Trace & Flow ID Formats"]
         TraceID["trace_id format<br><i>&lt;trace_id&gt;:&lt;epoch_time&gt;</i><br><i>same trace_id across entire run</i><br><i>new epoch per significant leg</i>"]
-        FlowID["flow_id format<br><i>&lt;username&gt;:&lt;trace_id&gt;-&lt;flow_label&gt;</i><br><i>flow_label defaults to exec</i><br><i>stored in DynamoDB, PR comments, scheduler</i>"]
+        FlowID["flow_id format<br><i>&lt;username&gt;:&lt;trace_id&gt;-&lt;flow_label&gt;</i><br><i>flow_label defaults to exec</i><br><i>stored in DynamoDB + scheduler</i>"]
     end
 
     subgraph Trace["Example Trace Across Legs (a3f7b2c1)"]
@@ -739,14 +722,13 @@ graph TB
         T2[":1708099203<br><i>repackage</i>"]
         T3[":1708099207<br><i>upload</i>"]
         T4[":1708099208<br><i>insert</i>"]
-        T5[":1708099209<br><i>pr_comment</i>"]
         T6[":1708099210<br><i>dispatch</i>"]
         T7[":1708099240<br><i>orch_read</i>"]
         T8[":1708099242<br><i>orch_dispatch</i>"]
         T9[":1708099300<br><i>finalize</i>"]
     end
 
-    T1 --> T2 --> T3 --> T4 --> T5 --> T6 --> T7 --> T8 --> T9
+    T1 --> T2 --> T3 --> T4 --> T6 --> T7 --> T8 --> T9
 
     style TraceID fill:#0a3544,stroke:#06b6d4,color:#e2e8f0
     style FlowID fill:#2d1052,stroke:#a855f7,color:#e2e8f0
@@ -754,7 +736,6 @@ graph TB
     style T2 fill:#3d1f00,stroke:#f97316,color:#e2e8f0
     style T3 fill:#003d2b,stroke:#10b981,color:#e2e8f0
     style T4 fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
-    style T5 fill:#0a3544,stroke:#06b6d4,color:#e2e8f0
     style T6 fill:#3d1f00,stroke:#f97316,color:#e2e8f0
     style T7 fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
     style T8 fill:#3d1f00,stroke:#f97316,color:#e2e8f0

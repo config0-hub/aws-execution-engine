@@ -24,9 +24,9 @@ resource "aws_sfn_state_machine" "watchdog" {
         Default = "WaitStep"
       }
       WaitStep = {
-        Type    = "Wait"
-        Seconds = 60
-        Next    = "CheckResult"
+        Type        = "Wait"
+        SecondsPath = "$.taskResult.wait_seconds"
+        Next        = "CheckResult"
       }
       Succeed = {
         Type = "Succeed"

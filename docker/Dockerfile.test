@@ -5,8 +5,13 @@ COPY requirements.txt requirements-test.txt ./
 RUN python3 -m pip install -r requirements.txt -r requirements-test.txt --target ${LAMBDA_TASK_ROOT}
 
 # Copy source and tests
-COPY src/ ${LAMBDA_TASK_ROOT}/src/
+COPY aws_exe_sys/ ${LAMBDA_TASK_ROOT}/aws_exe_sys/
 COPY tests/ ${LAMBDA_TASK_ROOT}/tests/
+
+# Copy CONTRACT.md, CLAUDE.md, and docs/ so contract-drift guards can compare docs to code
+COPY CONTRACT.md ${LAMBDA_TASK_ROOT}/CONTRACT.md
+COPY CLAUDE.md ${LAMBDA_TASK_ROOT}/CLAUDE.md
+COPY docs/ ${LAMBDA_TASK_ROOT}/docs/
 
 ENTRYPOINT ["python3", "-m", "pytest"]
 CMD ["tests/unit/", "-v"]

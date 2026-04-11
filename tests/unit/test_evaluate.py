@@ -1,9 +1,9 @@
-"""Unit tests for src/orchestrator/evaluate.py."""
+"""Unit tests for aws_exe_sys/orchestrator/evaluate.py."""
 
 import pytest
 
-from src.common.models import QUEUED, RUNNING, SUCCEEDED, FAILED, TIMED_OUT
-from src.orchestrator.evaluate import evaluate_orders
+from aws_exe_sys.common.models import QUEUED, RUNNING, SUCCEEDED, FAILED, TIMED_OUT
+from aws_exe_sys.orchestrator.evaluate import evaluate_orders
 
 
 def _order(queue_id, status=QUEUED, deps=None, must_succeed=True):

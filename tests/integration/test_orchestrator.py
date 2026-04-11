@@ -8,8 +8,8 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from src.common.models import QUEUED, RUNNING, SUCCEEDED, FAILED, JOB_ORDER_NAME
-from src.orchestrator.handler import handler as orch_handler
+from aws_exe_sys.common.models import QUEUED, RUNNING, SUCCEEDED, FAILED, JOB_ORDER_NAME
+from aws_exe_sys.orchestrator.handler import handler as orch_handler
 
 
 # ── Fixtures ──────────────────────────────────────────────────────
@@ -143,8 +143,8 @@ def mock_aws_resources(aws_env):
 @pytest.mark.integration
 class TestOrchestratorFlow:
 
-    @patch("src.orchestrator.dispatch._start_watchdog", return_value="arn:watchdog:exec")
-    @patch("src.orchestrator.dispatch._dispatch_lambda", return_value="req-123")
+    @patch("aws_exe_sys.orchestrator.dispatch._start_watchdog", return_value="arn:watchdog:exec")
+    @patch("aws_exe_sys.orchestrator.targets.lambda_target.LambdaTarget.dispatch", return_value="req-123")
     def test_partial_completion_then_dispatch(
         self, mock_lambda, mock_watchdog, mock_aws_resources,
     ):

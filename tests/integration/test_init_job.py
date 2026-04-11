@@ -10,8 +10,8 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from src.common.models import Job, Order, QUEUED, JOB_ORDER_NAME
-from src.init_job.handler import handler, process_job_and_insert_orders
+from aws_exe_sys.common.models import Job, Order, QUEUED, JOB_ORDER_NAME
+from aws_exe_sys.init_job.handler import handler, process_job_and_insert_orders
 
 
 # ── Fixtures ──────────────────────────────────────────────────────
@@ -134,11 +134,11 @@ def mock_aws_resources(aws_env):
 @pytest.mark.integration
 class TestInitJobFlow:
 
-    @patch("src.init_job.repackage.store_sops_key_ssm", return_value="/aws-exe-sys/sops-keys/run/0001")
-    @patch("src.init_job.repackage._generate_age_key", return_value=("age1pubkey", "AGE-SECRET-KEY", "/tmp/mock.key"))
-    @patch("src.init_job.repackage.resolve_git_credentials", return_value=("mock-token", None))
-    @patch("src.common.sops.repackage_order")
-    @patch("src.init_job.pr_comment.VcsHelper")
+    @patch("aws_exe_sys.init_job.repackage.store_sops_key_ssm", return_value="/aws-exe-sys/sops-keys/run/0001")
+    @patch("aws_exe_sys.init_job.repackage._generate_age_key", return_value=("age1pubkey", "AGE-SECRET-KEY", "/tmp/mock.key"))
+    @patch("aws_exe_sys.init_job.repackage.resolve_git_credentials", return_value=("mock-token", None))
+    @patch("aws_exe_sys.common.sops.repackage_order")
+    @patch("aws_exe_sys.init_job.pr_comment.VcsHelper")
     def test_full_init_job_creates_orders_and_trigger(
         self, mock_vcs_cls, mock_sops, mock_resolve_creds,
         mock_gen_key, mock_store_ssm, mock_aws_resources,
@@ -197,11 +197,11 @@ class TestInitJobFlow:
         assert len(job_events) >= 1
         assert job_events[0]["event_type"] == "job_started"
 
-    @patch("src.init_job.repackage.store_sops_key_ssm", return_value="/aws-exe-sys/sops-keys/run/0001")
-    @patch("src.init_job.repackage._generate_age_key", return_value=("age1pubkey", "AGE-SECRET-KEY", "/tmp/mock.key"))
-    @patch("src.init_job.repackage.resolve_git_credentials", return_value=("mock-token", None))
-    @patch("src.common.sops.repackage_order")
-    @patch("src.init_job.pr_comment.VcsHelper")
+    @patch("aws_exe_sys.init_job.repackage.store_sops_key_ssm", return_value="/aws-exe-sys/sops-keys/run/0001")
+    @patch("aws_exe_sys.init_job.repackage._generate_age_key", return_value=("age1pubkey", "AGE-SECRET-KEY", "/tmp/mock.key"))
+    @patch("aws_exe_sys.init_job.repackage.resolve_git_credentials", return_value=("mock-token", None))
+    @patch("aws_exe_sys.common.sops.repackage_order")
+    @patch("aws_exe_sys.init_job.pr_comment.VcsHelper")
     def test_init_job_pr_comment_disabled(
         self, mock_vcs_cls, mock_sops, mock_resolve_creds,
         mock_gen_key, mock_store_ssm, mock_aws_resources,
@@ -219,11 +219,11 @@ class TestInitJobFlow:
         # VCS should never be instantiated (PR comments disabled)
         mock_vcs_cls.assert_not_called()
 
-    @patch("src.init_job.repackage.store_sops_key_ssm", return_value="/aws-exe-sys/sops-keys/run/0001")
-    @patch("src.init_job.repackage._generate_age_key", return_value=("age1pubkey", "AGE-SECRET-KEY", "/tmp/mock.key"))
-    @patch("src.init_job.repackage.resolve_git_credentials", return_value=("mock-token", None))
-    @patch("src.common.sops.repackage_order")
-    @patch("src.init_job.pr_comment.VcsHelper")
+    @patch("aws_exe_sys.init_job.repackage.store_sops_key_ssm", return_value="/aws-exe-sys/sops-keys/run/0001")
+    @patch("aws_exe_sys.init_job.repackage._generate_age_key", return_value=("age1pubkey", "AGE-SECRET-KEY", "/tmp/mock.key"))
+    @patch("aws_exe_sys.init_job.repackage.resolve_git_credentials", return_value=("mock-token", None))
+    @patch("aws_exe_sys.common.sops.repackage_order")
+    @patch("aws_exe_sys.init_job.pr_comment.VcsHelper")
     def test_init_job_response_fields(
         self, mock_vcs_cls, mock_sops, mock_resolve_creds,
         mock_gen_key, mock_store_ssm, mock_aws_resources,
@@ -241,11 +241,11 @@ class TestInitJobFlow:
         assert result["done_endpt"].startswith("s3://test-done/")
         assert result["pr_search_tag"]
 
-    @patch("src.init_job.repackage.store_sops_key_ssm", return_value="/aws-exe-sys/sops-keys/run/0001")
-    @patch("src.init_job.repackage._generate_age_key", return_value=("age1pubkey", "AGE-SECRET-KEY", "/tmp/mock.key"))
-    @patch("src.init_job.repackage.resolve_git_credentials", return_value=("mock-token", None))
-    @patch("src.common.sops.repackage_order")
-    @patch("src.init_job.pr_comment.VcsHelper")
+    @patch("aws_exe_sys.init_job.repackage.store_sops_key_ssm", return_value="/aws-exe-sys/sops-keys/run/0001")
+    @patch("aws_exe_sys.init_job.repackage._generate_age_key", return_value=("age1pubkey", "AGE-SECRET-KEY", "/tmp/mock.key"))
+    @patch("aws_exe_sys.init_job.repackage.resolve_git_credentials", return_value=("mock-token", None))
+    @patch("aws_exe_sys.common.sops.repackage_order")
+    @patch("aws_exe_sys.init_job.pr_comment.VcsHelper")
     def test_init_job_via_apigw(
         self, mock_vcs_cls, mock_sops, mock_resolve_creds,
         mock_gen_key, mock_store_ssm, mock_aws_resources,

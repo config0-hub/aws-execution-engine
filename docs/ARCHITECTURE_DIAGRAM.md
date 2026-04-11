@@ -10,15 +10,17 @@ Visual overview of the aws-exe-sys system. For an interactive version with full 
 flowchart LR
     VCS["Caller<br><i>SigV4 + JWT</i>"]
     AWS["Your AWS Account<br><i>Validates, queues, executes</i>"]
-    Results["Results<br><i>PR comment + logs</i>"]
+    Results["Results<br><i>done marker + logs</i>"]
 
     VCS -- "POST /init<br>job payload" --> AWS
-    AWS -- "PR comment<br>+ status update" --> Results
+    AWS -- "status update<br>+ done marker" --> Results
 
     style VCS fill:#1e3a5f,stroke:#3b82f6,color:#e2e8f0
     style AWS fill:#3d1f00,stroke:#f97316,color:#e2e8f0
     style Results fill:#003d2b,stroke:#10b981,color:#e2e8f0
 ```
+
+> **PR comments are the caller's responsibility.** The engine exposes `aws_exe_sys/common/vcs/` as a library for callers that need it, but does not post comments itself.
 
 **Key properties:**
 - Fully serverless -- nothing runs 24/7
@@ -39,7 +41,6 @@ sequenceDiagram
     participant SSM as SSM Parameter Store
     participant S3 as S3 (internal)
     participant DDB as DynamoDB
-    participant PR as VCS PR
 
     VCS->>APIGW: POST /init (job payload)
     APIGW->>IJ: Invoke (AWS_PROXY)
@@ -48,13 +49,11 @@ sequenceDiagram
 
     IJ->>IJ: Fetch code (S3/Git)<br>Fetch secrets (SSM/SecretsManager)<br>Encrypt with SOPS (age key)<br>Generate presigned callback URLs
 
-    IJ->>SSM: Store SOPS private key<br>as SecureString<br>/aws-exe-sys/sops-keys/<run_id>/<order_num>
+    IJ->>SSM: Store SOPS private key<br>as SecureString<br>/exe-sys/sops-keys/<run_id>/<order_num>
 
     IJ->>S3: PUT exec.zip per order<br>tmp/exec/<run_id>/<order_num>/exec.zip
 
     IJ->>DDB: Insert orders (status: queued)<br>Write order_events (trace_id)
-
-    IJ->>PR: Post initial PR comment<br>(order list with "queued" status)
 
     IJ->>S3: Write init trigger<br>tmp/callbacks/runs/<run_id>/0000/result.json
 
@@ -75,7 +74,6 @@ sequenceDiagram
     participant SSM as SSM Parameter Store
     participant Worker as Worker (Lambda/CodeBuild)
     participant SFN as Watchdog (Step Function)
-    participant PR as VCS PR
 
     S3-->>Orch: ObjectCreated event<br>(result.json written)
 
@@ -93,7 +91,7 @@ sequenceDiagram
         Orch->>DDB: Update status → running
     end
 
-    Worker->>SSM: Fetch SOPS private key<br>/aws-exe-sys/sops-keys/<run_id>/<order_num>
+    Worker->>SSM: Fetch SOPS private key<br>/exe-sys/sops-keys/<run_id>/<order_num>
     Worker->>Worker: Decrypt SOPS → env vars<br>Run commands<br>Capture stdout/stderr
 
     Worker->>S3: PUT result.json via presigned URL<br>(status + log)
@@ -104,7 +102,6 @@ sequenceDiagram
 
     Orch->>S3: Write done marker<br>(when all orders complete)
     Orch->>SSM: Delete SOPS key parameters<br>(cleanup)
-    Orch->>PR: Final PR comment with summary
     Orch->>DDB: Release lock
 ```
 

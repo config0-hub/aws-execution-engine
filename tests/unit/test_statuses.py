@@ -1,6 +1,6 @@
-"""Unit tests for src/common/statuses.py."""
+"""Unit tests for aws_exe_sys/common/statuses.py."""
 
-from src.common.statuses import (
+from aws_exe_sys.common.statuses import (
     QUEUED, RUNNING, SUCCEEDED, FAILED, TIMED_OUT,
     JOB_ORDER_NAME, EXECUTION_TARGETS, TERMINAL_STATUSES, FAILED_STATUSES,
 )

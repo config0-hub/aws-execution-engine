@@ -22,11 +22,11 @@ COPY requirements.txt ./
 RUN python3 -m pip install -r requirements.txt --target ${LAMBDA_TASK_ROOT}
 
 # Copy source
-COPY src/ ${LAMBDA_TASK_ROOT}/src/
+COPY aws_exe_sys/ ${LAMBDA_TASK_ROOT}/aws_exe_sys/
 
 # Copy CodeBuild entrypoint
-COPY src/worker/entrypoint.sh /entrypoint.sh
+COPY aws_exe_sys/worker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 # Default handler (overridden per Lambda function via image_config.command)
-CMD ["src.worker.handler.handler"]
+CMD ["aws_exe_sys.worker.handler.handler"]

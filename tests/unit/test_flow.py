@@ -1,6 +1,6 @@
-"""Unit tests for src/common/flow.py."""
+"""Unit tests for aws_exe_sys/common/flow.py."""
 
-from src.common.flow import generate_flow_id, parse_flow_id
+from aws_exe_sys.common.flow import generate_flow_id, parse_flow_id
 
 
 class TestGenerateFlowId:

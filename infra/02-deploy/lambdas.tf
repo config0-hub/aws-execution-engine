@@ -7,6 +7,14 @@ locals {
     AWS_EXE_SYS_DONE_BUCKET        = aws_s3_bucket.done.id
     AWS_EXE_SYS_SSM_PREFIX         = "exe-sys"
   }
+
+  # Bootstrap seam. When kind = "inline" (default), this map is empty and
+  # no env vars are added, keeping tofu plan zero-diff against the baseline.
+  # When kind = "ssm_url", the 3 engine-code env vars are layered on top.
+  engine_bootstrap_env = var.engine_code_source.kind == "ssm_url" ? {
+    ENGINE_HANDLER_FUNC  = "handler"
+    ENGINE_CODE_SSM_PATH = var.engine_code_source.value
+  } : {}
 }
 
 # --- init_job ---
@@ -20,13 +28,18 @@ resource "aws_lambda_function" "init_job" {
   memory_size   = local.default_lambda_memory > 0 ? local.default_lambda_memory : 512
 
   image_config {
-    command = ["src.init_job.handler.handler"]
+    command = var.engine_code_source.kind == "inline" ? ["aws_exe_sys.init_job.handler.handler"] : ["aws_exe_sys.bootstrap_handler.handler"]
   }
 
   environment {
-    variables = merge(local.lambda_env, {
-      JWT_SECRET_SSM_PATH = var.jwt_secret_ssm_path
-    })
+    variables = merge(
+      local.lambda_env,
+      {
+        JWT_SECRET_SSM_PATH = var.jwt_secret_ssm_path
+      },
+      local.engine_bootstrap_env,
+      var.engine_code_source.kind == "ssm_url" ? { ENGINE_HANDLER = "aws_exe_sys.init_job.handler" } : {},
+    )
   }
 }
 
@@ -46,16 +59,21 @@ resource "aws_lambda_function" "orchestrator" {
   memory_size   = local.default_lambda_memory > 0 ? local.default_lambda_memory : 512
 
   image_config {
-    command = ["src.orchestrator.handler.handler"]
+    command = var.engine_code_source.kind == "inline" ? ["aws_exe_sys.orchestrator.handler.handler"] : ["aws_exe_sys.bootstrap_handler.handler"]
   }
 
   environment {
-    variables = merge(local.lambda_env, {
-      AWS_EXE_SYS_WORKER_LAMBDA     = "${local.prefix}-worker"
-      AWS_EXE_SYS_CODEBUILD_PROJECT = aws_codebuild_project.worker.name
-      AWS_EXE_SYS_WATCHDOG_SFN      = aws_sfn_state_machine.watchdog.arn
-      AWS_EXE_SYS_SSM_DOCUMENT      = aws_ssm_document.run_commands.name
-    })
+    variables = merge(
+      local.lambda_env,
+      {
+        AWS_EXE_SYS_WORKER_LAMBDA     = "${local.prefix}-worker"
+        AWS_EXE_SYS_CODEBUILD_PROJECT = aws_codebuild_project.worker.name
+        AWS_EXE_SYS_WATCHDOG_SFN      = aws_sfn_state_machine.watchdog.arn
+        AWS_EXE_SYS_SSM_DOCUMENT      = aws_ssm_document.run_commands.name
+      },
+      local.engine_bootstrap_env,
+      var.engine_code_source.kind == "ssm_url" ? { ENGINE_HANDLER = "aws_exe_sys.orchestrator.handler" } : {},
+    )
   }
 }
 
@@ -70,11 +88,15 @@ resource "aws_lambda_function" "watchdog_check" {
   memory_size   = local.default_lambda_memory > 0 ? local.default_lambda_memory : 256
 
   image_config {
-    command = ["src.watchdog_check.handler.handler"]
+    command = var.engine_code_source.kind == "inline" ? ["aws_exe_sys.watchdog_check.handler.handler"] : ["aws_exe_sys.bootstrap_handler.handler"]
   }
 
   environment {
-    variables = local.lambda_env
+    variables = merge(
+      local.lambda_env,
+      local.engine_bootstrap_env,
+      var.engine_code_source.kind == "ssm_url" ? { ENGINE_HANDLER = "aws_exe_sys.watchdog_check.handler" } : {},
+    )
   }
 }
 
@@ -89,11 +111,15 @@ resource "aws_lambda_function" "worker" {
   memory_size   = local.default_lambda_memory > 0 ? local.default_lambda_memory : 1024
 
   image_config {
-    command = ["src.worker.handler.handler"]
+    command = var.engine_code_source.kind == "inline" ? ["aws_exe_sys.worker.handler.handler"] : ["aws_exe_sys.bootstrap_handler.handler"]
   }
 
   environment {
-    variables = local.lambda_env
+    variables = merge(
+      local.lambda_env,
+      local.engine_bootstrap_env,
+      var.engine_code_source.kind == "ssm_url" ? { ENGINE_HANDLER = "aws_exe_sys.worker.handler" } : {},
+    )
   }
 }
 
@@ -108,10 +134,14 @@ resource "aws_lambda_function" "ssm_config" {
   memory_size   = local.default_lambda_memory > 0 ? local.default_lambda_memory : 512
 
   image_config {
-    command = ["src.ssm_config.handler.handler"]
+    command = var.engine_code_source.kind == "inline" ? ["aws_exe_sys.ssm_config.handler.handler"] : ["aws_exe_sys.bootstrap_handler.handler"]
   }
 
   environment {
-    variables = local.lambda_env
+    variables = merge(
+      local.lambda_env,
+      local.engine_bootstrap_env,
+      var.engine_code_source.kind == "ssm_url" ? { ENGINE_HANDLER = "aws_exe_sys.ssm_config.handler" } : {},
+    )
   }
 }

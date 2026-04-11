@@ -1,4 +1,4 @@
-"""Unit tests for src/ssm_config/handler.py."""
+"""Unit tests for aws_exe_sys/ssm_config/handler.py."""
 
 import base64
 import json
@@ -6,9 +6,9 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from src.common.models import SsmJob, SsmOrder
-from src.common.lambda_handler import normalize_event
-from src.ssm_config.handler import handler, process_ssm_job
+from aws_exe_sys.common.models import SsmJob, SsmOrder
+from aws_exe_sys.common.lambda_handler import normalize_event
+from aws_exe_sys.ssm_config.handler import handler, process_ssm_job
 
 
 def _make_ssm_job_b64(**kwargs):
@@ -79,7 +79,7 @@ class TestHandlerDirectInvoke:
         assert "Missing" in resp["error"]
         assert "statusCode" not in resp  # not wrapped in APIGW format
 
-    @patch("src.ssm_config.handler.process_ssm_job")
+    @patch("aws_exe_sys.ssm_config.handler.process_ssm_job")
     def test_valid_request_returns_ok(self, mock_process):
         mock_process.return_value = {
             "status": "ok",
@@ -95,7 +95,7 @@ class TestHandlerDirectInvoke:
         assert resp["run_id"] == "run-1"
         assert "statusCode" not in resp
 
-    @patch("src.ssm_config.handler.process_ssm_job")
+    @patch("aws_exe_sys.ssm_config.handler.process_ssm_job")
     def test_exception_returns_error(self, mock_process):
         mock_process.side_effect = RuntimeError("boom")
 
@@ -108,7 +108,7 @@ class TestHandlerDirectInvoke:
 # ── handler (API Gateway) ────────────────────────────────────────
 
 class TestHandlerAPIGateway:
-    @patch("src.ssm_config.handler.process_ssm_job")
+    @patch("aws_exe_sys.ssm_config.handler.process_ssm_job")
     def test_apigw_post_returns_200(self, mock_process):
         mock_process.return_value = {"status": "ok", "run_id": "r1"}
 
@@ -131,7 +131,7 @@ class TestHandlerAPIGateway:
         body = json.loads(resp["body"])
         assert "Missing" in body["error"]
 
-    @patch("src.ssm_config.handler.process_ssm_job")
+    @patch("aws_exe_sys.ssm_config.handler.process_ssm_job")
     def test_apigw_error_returns_400(self, mock_process):
         mock_process.return_value = {"status": "error", "errors": ["bad order"]}
 
@@ -140,7 +140,7 @@ class TestHandlerAPIGateway:
         resp = handler(event)
         assert resp["statusCode"] == 400
 
-    @patch("src.ssm_config.handler.process_ssm_job")
+    @patch("aws_exe_sys.ssm_config.handler.process_ssm_job")
     def test_apigw_exception_returns_500(self, mock_process):
         mock_process.side_effect = RuntimeError("crash")
 
@@ -155,7 +155,7 @@ class TestHandlerAPIGateway:
 # ── handler (SNS) ────────────────────────────────────────────────
 
 class TestHandlerSNS:
-    @patch("src.ssm_config.handler.process_ssm_job")
+    @patch("aws_exe_sys.ssm_config.handler.process_ssm_job")
     def test_sns_event_processed(self, mock_process):
         mock_process.return_value = {"status": "ok", "run_id": "r1"}
 

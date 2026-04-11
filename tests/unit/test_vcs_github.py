@@ -1,11 +1,13 @@
-"""Unit tests for src/common/vcs/github.py — GitHub provider layer."""
+"""Unit tests for aws_exe_sys/common/vcs/github.py — GitHub provider layer."""
 
 import json
+import subprocess
+from unittest.mock import patch
 
 import pytest
 import responses
 
-from src.common.vcs.github import GitHubProvider, GITHUB_API_BASE
+from aws_exe_sys.common.vcs.github import GitHubProvider, GITHUB_API_BASE
 
 
 @pytest.fixture
@@ -163,3 +165,143 @@ class TestFindCommentByTag:
             status=200,
         )
         assert github.find_comment_by_tag("org/repo", 42, "#missing", "token") is None
+
+
+# ---------------------------------------------------------------------------
+# get_clone_url — URL construction, no hardcoded github.com
+# ---------------------------------------------------------------------------
+
+
+class TestGetCloneUrl:
+    def test_anonymous_url(self, github):
+        assert github.get_clone_url("org/repo") == "https://github.com/org/repo.git"
+
+    def test_token_url_uses_x_access_token(self, github):
+        url = github.get_clone_url("org/repo", token="ghp_abc")
+        assert url == "https://x-access-token:ghp_abc@github.com/org/repo.git"
+
+    def test_https_host_is_configurable(self):
+        """A subclass can override ``https_host`` for GitHub Enterprise."""
+        class GheProvider(GitHubProvider):
+            https_host = "ghe.example.com"
+            ssh_host = "ghe.example.com"
+
+        ghe = GheProvider()
+        assert ghe.get_clone_url("org/repo") == "https://ghe.example.com/org/repo.git"
+        assert (
+            ghe.get_clone_url("org/repo", token="tok")
+            == "https://x-access-token:tok@ghe.example.com/org/repo.git"
+        )
+
+
+# ---------------------------------------------------------------------------
+# clone — HTTPS primary, SSH fallback, public, with commit checkout
+# ---------------------------------------------------------------------------
+
+
+class TestClone:
+    def test_clone_https_token_url(self, github, tmp_path):
+        """HTTPS clone with token calls git with the token-embedded URL."""
+        dest = str(tmp_path / "repo")
+        with patch("aws_exe_sys.common.vcs.github.subprocess.run") as mock_run:
+            github.clone("org/repo", dest=dest, token="ghp_secret")
+
+        assert mock_run.call_count == 1
+        args, kwargs = mock_run.call_args
+        cmd = args[0]
+        assert cmd[0] == "git"
+        assert cmd[1] == "clone"
+        assert "https://x-access-token:ghp_secret@github.com/org/repo.git" in cmd
+        assert dest in cmd
+        assert kwargs["check"] is True
+
+    def test_clone_https_anonymous(self, github, tmp_path):
+        """No token, no SSH key → unauthenticated HTTPS (public repo)."""
+        dest = str(tmp_path / "pub")
+        with patch("aws_exe_sys.common.vcs.github.subprocess.run") as mock_run:
+            github.clone("public/repo", dest=dest)
+
+        assert mock_run.call_count == 1
+        cmd = mock_run.call_args.args[0]
+        assert "https://github.com/public/repo.git" in cmd
+        # Anonymous URL must not leak any token placeholder.
+        assert "x-access-token" not in " ".join(cmd)
+
+    def test_clone_ssh(self, github, tmp_path):
+        """SSH-only path uses GIT_SSH_COMMAND env var and git@host: URL."""
+        dest = str(tmp_path / "ssh-repo")
+        with patch("aws_exe_sys.common.vcs.github.subprocess.run") as mock_run:
+            github.clone_ssh("org/repo", dest=dest, ssh_key_path="/tmp/key")
+
+        assert mock_run.call_count == 1
+        args, kwargs = mock_run.call_args
+        cmd = args[0]
+        assert "git@github.com:org/repo.git" in cmd
+        env = kwargs["env"]
+        assert "GIT_SSH_COMMAND" in env
+        assert "/tmp/key" in env["GIT_SSH_COMMAND"]
+
+    def test_clone_https_fallback_to_ssh_on_failure(self, github, tmp_path):
+        """When HTTPS clone fails and an SSH key is provided, fall back to SSH."""
+        dest = str(tmp_path / "fallback")
+        calls: list = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            if len(calls) == 1:
+                # First call = HTTPS, fail it
+                raise subprocess.CalledProcessError(1, cmd, stderr="auth failed")
+            # Second call = SSH, succeed
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with patch("aws_exe_sys.common.vcs.github.subprocess.run", side_effect=fake_run):
+            github.clone(
+                "org/repo", dest=dest, token="bad", ssh_key_path="/tmp/key",
+            )
+
+        assert len(calls) == 2
+        https_cmd = calls[0][0]
+        ssh_cmd = calls[1][0]
+        assert "https://x-access-token:bad@github.com/org/repo.git" in https_cmd
+        assert "git@github.com:org/repo.git" in ssh_cmd
+
+    def test_clone_with_commit_hash_checks_out(self, github, tmp_path):
+        """After clone, commit_hash triggers a git checkout."""
+        dest = str(tmp_path / "commit")
+        with patch("aws_exe_sys.common.vcs.github.subprocess.run") as mock_run:
+            github.clone("org/repo", dest=dest, token="tok", commit_hash="abc123")
+
+        # Call 1 = clone, call 2 = checkout
+        assert mock_run.call_count == 2
+        clone_cmd = mock_run.call_args_list[0].args[0]
+        checkout_cmd = mock_run.call_args_list[1].args[0]
+        assert clone_cmd[:3] == ["git", "clone", "--depth"]
+        assert clone_cmd[3] == "2"  # depth=2 when commit_hash set
+        assert checkout_cmd == ["git", "checkout", "abc123"]
+
+    def test_clone_commit_not_in_shallow_falls_back_to_fetch(
+        self, github, tmp_path,
+    ):
+        """If the commit isn't in the shallow clone, fall back to git fetch."""
+        dest = str(tmp_path / "deep")
+        calls: list = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            if cmd[:3] == ["git", "checkout", "abc123"] and len(
+                [c for c in calls if c[:3] == ["git", "checkout", "abc123"]]
+            ) == 1:
+                raise subprocess.CalledProcessError(1, cmd, stderr="not found")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with patch("aws_exe_sys.common.vcs.github.subprocess.run", side_effect=fake_run):
+            github.clone(
+                "org/repo", dest=dest, token="t", commit_hash="abc123",
+            )
+
+        # clone + checkout (fail) + fetch + checkout (succeed)
+        assert len(calls) == 4
+        assert calls[0][:2] == ["git", "clone"]
+        assert calls[1] == ["git", "checkout", "abc123"]
+        assert calls[2][:3] == ["git", "fetch", "--depth"]
+        assert calls[3] == ["git", "checkout", "abc123"]

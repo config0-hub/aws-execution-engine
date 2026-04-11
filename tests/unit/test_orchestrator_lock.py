@@ -1,10 +1,10 @@
-"""Unit tests for src/orchestrator/lock.py."""
+"""Unit tests for aws_exe_sys/orchestrator/lock.py."""
 
 import boto3
 import pytest
 from moto import mock_aws
 
-from src.orchestrator.lock import acquire_lock, release_lock
+from aws_exe_sys.orchestrator.lock import acquire_lock, release_lock
 
 
 @pytest.fixture

@@ -10,6 +10,20 @@ data "aws_iam_policy_document" "lambda_assume" {
   }
 }
 
+# --- Bootstrap seam: conditional ssm:GetParameter on engine code path ---
+# Emitted only when var.engine_code_source.kind == "ssm_url"; when "inline"
+# this list is empty and leaves every Lambda role's policy byte-identical
+# to the baseline (tofu plan zero-diff).
+locals {
+  engine_code_read_statements = var.engine_code_source.kind == "ssm_url" ? [
+    {
+      Effect   = "Allow"
+      Action   = ["ssm:GetParameter"]
+      Resource = "arn:aws:ssm:${local.region}:${local.account_id}:parameter${var.engine_code_source.value}*"
+    }
+  ] : []
+}
+
 # --- CloudWatch Logs policy (attached to all Lambda roles) ---
 
 data "aws_iam_policy_document" "lambda_logs" {
@@ -38,7 +52,7 @@ resource "aws_iam_role_policy" "init_job" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
+    Statement = concat([
       {
         Effect = "Allow"
         Action = ["dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:Query"]
@@ -69,7 +83,7 @@ resource "aws_iam_role_policy" "init_job" {
         Action   = ["secretsmanager:GetSecretValue"]
         Resource = "arn:aws:secretsmanager:${local.region}:${local.account_id}:secret:*"
       },
-    ]
+    ], local.engine_code_read_statements)
   })
 }
 
@@ -94,7 +108,7 @@ resource "aws_iam_role_policy" "orchestrator" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
+    Statement = concat([
       {
         Effect = "Allow"
         Action = [
@@ -156,7 +170,7 @@ resource "aws_iam_role_policy" "orchestrator" {
         Action   = ["ssm:DeleteParameter"]
         Resource = "arn:aws:ssm:${local.region}:${local.account_id}:parameter/exe-sys/sops-keys/*"
       },
-    ]
+    ], local.engine_code_read_statements)
   })
 }
 
@@ -181,13 +195,13 @@ resource "aws_iam_role_policy" "watchdog_check" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
+    Statement = concat([
       {
         Effect   = "Allow"
         Action   = ["s3:GetObject", "s3:PutObject"]
         Resource = "${aws_s3_bucket.internal.arn}/tmp/callbacks/runs/*"
       },
-    ]
+    ], local.engine_code_read_statements)
   })
 }
 
@@ -212,7 +226,7 @@ resource "aws_iam_role_policy" "worker" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
+    Statement = concat([
       {
         Effect   = "Allow"
         Action   = ["s3:GetObject"]
@@ -223,12 +237,33 @@ resource "aws_iam_role_policy" "worker" {
         Action   = ["dynamodb:PutItem"]
         Resource = aws_dynamodb_table.order_events.arn
       },
+      # Callback fallback — when the presigned S3 PUT is unreachable,
+      # the worker writes the failure status directly to DynamoDB so
+      # the order is not stranded in RUNNING. Scoped to three
+      # attributes via ForAllValues:StringEquals (note the
+      # ForAllValues prefix — without it AWS only requires AT LEAST
+      # ONE referenced attribute to match the allowlist, which is
+      # useless for restriction). ReturnValues = NONE prevents the
+      # worker from reading existing item state via UpdateItem.
+      {
+        Effect   = "Allow"
+        Action   = ["dynamodb:UpdateItem"]
+        Resource = aws_dynamodb_table.orders.arn
+        Condition = {
+          "ForAllValues:StringEquals" = {
+            "dynamodb:Attributes" = ["status", "last_update", "error"]
+          }
+          StringEquals = {
+            "dynamodb:ReturnValues" = "NONE"
+          }
+        }
+      },
       {
         Effect   = "Allow"
         Action   = ["ssm:GetParameter"]
         Resource = "arn:aws:ssm:${local.region}:${local.account_id}:parameter/exe-sys/sops-keys/*"
       },
-    ]
+    ], local.engine_code_read_statements)
   })
 }
 
@@ -319,7 +354,7 @@ resource "aws_iam_role_policy" "ssm_config" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
+    Statement = concat([
       {
         Effect = "Allow"
         Action = ["dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:Query"]
@@ -344,7 +379,7 @@ resource "aws_iam_role_policy" "ssm_config" {
         Action   = ["secretsmanager:GetSecretValue"]
         Resource = "arn:aws:secretsmanager:${local.region}:${local.account_id}:secret:*"
       },
-    ]
+    ], local.engine_code_read_statements)
   })
 }
 

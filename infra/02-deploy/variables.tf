@@ -47,3 +47,37 @@ variable "jwt_secret_ssm_path" {
   type        = string
   default     = ""
 }
+
+variable "engine_code_source" {
+  description = <<-EOT
+    Engine code loading strategy (bootstrap seam).
+
+    - kind = "inline"  — Lambdas load from the baked image (current behavior, zero diff).
+                         value must be "".
+    - kind = "ssm_url" — Lambdas load via aws_exe_sys/bootstrap_handler.py at cold start.
+                         value is the SSM Parameter Store path holding a
+                         base64-encoded JSON dict {"url": "...", "sha256": "..."}.
+
+    The default is "inline" — leaving this unset keeps the live deployment unchanged.
+  EOT
+  type = object({
+    kind  = string
+    value = string
+  })
+  default = {
+    kind  = "inline"
+    value = ""
+  }
+  validation {
+    condition     = contains(["inline", "ssm_url"], var.engine_code_source.kind)
+    error_message = "engine_code_source.kind must be \"inline\" or \"ssm_url\"."
+  }
+  validation {
+    condition     = var.engine_code_source.kind == "inline" || length(var.engine_code_source.value) > 0
+    error_message = "engine_code_source.value must be a non-empty SSM path when kind=\"ssm_url\"."
+  }
+  validation {
+    condition     = var.engine_code_source.kind != "inline" || length(var.engine_code_source.value) == 0
+    error_message = "engine_code_source.value must be empty when kind=\"inline\"."
+  }
+}

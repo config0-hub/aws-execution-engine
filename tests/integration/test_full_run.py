@@ -8,9 +8,9 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from src.common.models import Job, Order, QUEUED, RUNNING, SUCCEEDED, JOB_ORDER_NAME
-from src.init_job.handler import handler as init_handler
-from src.orchestrator.handler import handler as orch_handler
+from aws_exe_sys.common.models import Job, Order, QUEUED, RUNNING, SUCCEEDED, JOB_ORDER_NAME
+from aws_exe_sys.init_job.handler import handler as init_handler
+from aws_exe_sys.orchestrator.handler import handler as orch_handler
 
 
 # ── Fixtures ──────────────────────────────────────────────────────
@@ -121,13 +121,13 @@ def _write_result(s3, run_id, order_num, status="succeeded", log="done"):
 @pytest.mark.integration
 class TestFullRun:
 
-    @patch("src.init_job.repackage.store_sops_key_ssm", return_value="/aws-exe-sys/sops-keys/run/0001")
-    @patch("src.init_job.repackage._generate_age_key", return_value=("age1pubkey", "AGE-SECRET-KEY", "/tmp/mock.key"))
-    @patch("src.init_job.repackage.resolve_git_credentials", return_value=("mock-token", None))
-    @patch("src.orchestrator.dispatch._start_watchdog", return_value="arn:watchdog:exec")
-    @patch("src.orchestrator.dispatch._dispatch_lambda", return_value="req-123")
-    @patch("src.common.sops.repackage_order")
-    @patch("src.init_job.pr_comment.VcsHelper")
+    @patch("aws_exe_sys.init_job.repackage.store_sops_key_ssm", return_value="/aws-exe-sys/sops-keys/run/0001")
+    @patch("aws_exe_sys.init_job.repackage._generate_age_key", return_value=("age1pubkey", "AGE-SECRET-KEY", "/tmp/mock.key"))
+    @patch("aws_exe_sys.init_job.repackage.resolve_git_credentials", return_value=("mock-token", None))
+    @patch("aws_exe_sys.orchestrator.dispatch._start_watchdog", return_value="arn:watchdog:exec")
+    @patch("aws_exe_sys.orchestrator.targets.lambda_target.LambdaTarget.dispatch", return_value="req-123")
+    @patch("aws_exe_sys.common.sops.repackage_order")
+    @patch("aws_exe_sys.init_job.pr_comment.VcsHelper")
     def test_three_order_dependency_chain(
         self, mock_vcs_cls, mock_sops, mock_dispatch, mock_watchdog,
         mock_resolve_creds, mock_gen_key, mock_store_ssm,

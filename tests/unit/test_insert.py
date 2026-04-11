@@ -1,4 +1,4 @@
-"""Unit tests for src/init_job/insert.py."""
+"""Unit tests for aws_exe_sys/init_job/insert.py."""
 
 import base64
 import json
@@ -7,9 +7,9 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from src.common.models import Job, Order, QUEUED, JOB_ORDER_NAME
-from src.common import dynamodb
-from src.init_job.insert import insert_orders
+from aws_exe_sys.common.models import Job, Order, QUEUED, JOB_ORDER_NAME
+from aws_exe_sys.common import dynamodb
+from aws_exe_sys.init_job.insert import insert_orders
 
 
 @pytest.fixture
