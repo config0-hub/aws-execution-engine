@@ -2,10 +2,11 @@
 
 `aws_exe_sys` is a generic AWS-native execution helper.
 
-It exposes two Lambda entry points:
+It exposes three Lambda entry points:
 
 - `init_job` — validate payload and dispatch work.
-- `worker` — execute commands and write the terminal result to S3.
+- `worker` — execute commands and write the detailed terminal result to S3.
+- `finalizer` — atomically create a missing failed CodeBuild fallback result.
 
 ## Contract
 
@@ -34,9 +35,10 @@ SimplePayload:
 `init_job` selects target behavior by `execution_target`:
 
 - `lambda` → async `Invoke` of `AWS_EXE_SYS_WORKER_LAMBDA`
-- `codebuild` → `start_build` on `AWS_EXE_SYS_CODEBUILD_PROJECT`
+- `codebuild` → async `StartExecution` of `AWS_EXE_SYS_CODEBUILD_STATE_MACHINE_ARN`
 
-All seven payload fields are passed as plain strings.
+The Standard workflow starts the managed CodeBuild worker with all seven payload fields as plain-string
+environment overrides, waits for a terminal build state, and invokes the finalizer.
 
 ### 3. Worker run and completion
 
@@ -47,4 +49,6 @@ All seven payload fields are passed as plain strings.
 3. runs `commands_b64` sequentially
 4. writes an `ExecutionResult` JSON object to `done_endpoint`; a write failure propagates
 
-Completion is detected by the presence of the `done_endpoint` object (no callbacks or polling API).
+For CodeBuild, the worker is the primary result writer. The finalizer uses `If-None-Match: *` to preserve an
+existing marker or create a canonical failed fallback when the marker is missing. Non-precondition S3 errors
+propagate. Completion is detected by the presence of the `done_endpoint` object (no callbacks or polling API).

@@ -13,7 +13,9 @@ aws-exe-sys/
 │   ├── init_job/
 │   │   ├── handler.py          # API/Lambda entry for dispatch
 │   │   ├── validate.py         # preflight resource checks
-│   │   └── dispatcher.py       # lambda/codebuild dispatch targets
+│   │   └── dispatcher.py       # Lambda/Step Functions dispatch targets
+│   ├── finalizer/
+│   │   └── handler.py          # atomic missing-result fallback
 │   └── worker/
 │       ├── handler.py          # worker Lambda entry
 │       ├── run.py              # execute payload commands and write result
@@ -37,3 +39,4 @@ aws-exe-sys/
 
 - `aws_exe_sys.init_job.handler.handler`
 - `aws_exe_sys.worker.handler.handler`
+- `aws_exe_sys.finalizer.handler.handler`

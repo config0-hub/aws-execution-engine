@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import uuid
 
 import boto3
 
@@ -44,22 +45,19 @@ def dispatch_to_lambda(payload: SimplePayload) -> dict:
 
 
 def dispatch_to_codebuild(payload: SimplePayload) -> dict:
-    """Start a CodeBuild build with all 7 payload fields as env vars."""
-    project_name = os.environ["AWS_EXE_SYS_CODEBUILD_PROJECT"]
-    client = boto3.client("codebuild")
+    """Start the Standard workflow that owns the CodeBuild lifecycle."""
+    state_machine_arn = os.environ["AWS_EXE_SYS_CODEBUILD_STATE_MACHINE_ARN"]
+    client = boto3.client("stepfunctions")
+    execution_name = f"aws-exe-{uuid.uuid4().hex}"
 
-    env_overrides = [
-        {"name": field.upper(), "value": value, "type": "PLAINTEXT"}
-        for field, value in _payload_to_dict(payload).items()
-    ]
-
-    response = client.start_build(
-        projectName=project_name,
-        environmentVariablesOverride=env_overrides,
+    response = client.start_execution(
+        stateMachineArn=state_machine_arn,
+        name=execution_name,
+        input=json.dumps(_payload_to_dict(payload)),
     )
     logger.info(
-        "Dispatched to CodeBuild",
-        extra={"project": project_name, "trigger_id": payload.trigger_id},
+        "Dispatched CodeBuild workflow",
+        extra={"state_machine": state_machine_arn, "trigger_id": payload.trigger_id},
     )
     return response
 

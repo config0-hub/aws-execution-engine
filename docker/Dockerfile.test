@@ -16,6 +16,7 @@ RUN python3 -m pip install -r requirements.txt -r requirements-test.txt --target
 # Copy source and tests
 COPY aws_exe_sys/ ${LAMBDA_TASK_ROOT}/aws_exe_sys/
 COPY tests/ ${LAMBDA_TASK_ROOT}/tests/
+COPY infra/02-deploy/step_functions.tf ${LAMBDA_TASK_ROOT}/infra/02-deploy/step_functions.tf
 
 # Copy CONTRACT.md, CLAUDE.md, and docs/ so contract-drift guards can compare docs to code
 COPY CONTRACT.md ${LAMBDA_TASK_ROOT}/CONTRACT.md

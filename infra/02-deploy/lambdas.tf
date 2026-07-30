@@ -23,8 +23,8 @@ resource "aws_lambda_function" "init_job" {
     variables = merge(
       local.lambda_env,
       {
-        AWS_EXE_SYS_WORKER_LAMBDA     = "${local.prefix}-worker"
-        AWS_EXE_SYS_CODEBUILD_PROJECT = aws_codebuild_project.worker.name
+        AWS_EXE_SYS_WORKER_LAMBDA               = "${local.prefix}-worker"
+        AWS_EXE_SYS_CODEBUILD_STATE_MACHINE_ARN = aws_sfn_state_machine.codebuild.arn
       },
     )
   }
@@ -33,6 +33,21 @@ resource "aws_lambda_function" "init_job" {
 resource "aws_lambda_function_url" "init_job" {
   function_name      = aws_lambda_function.init_job.function_name
   authorization_type = "AWS_IAM"
+}
+
+# --- finalizer: atomically creates only a missing failed CodeBuild result. ---
+
+resource "aws_lambda_function" "finalizer" {
+  function_name = "${local.prefix}-finalizer"
+  role          = aws_iam_role.finalizer.arn
+  package_type  = "Zip"
+  s3_bucket     = var.engine_zip_s3_bucket
+  s3_key        = var.engine_zip_s3_key
+  handler       = "aws_exe_sys.finalizer.handler.handler"
+  runtime       = "python3.14"
+  architectures = ["x86_64"]
+  timeout       = 30
+  memory_size   = 128
 }
 
 # --- worker: executes payload commands and decrypts optional SOPS payloads. ---

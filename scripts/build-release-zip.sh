@@ -108,6 +108,7 @@ engine_path = Path(sys.argv[1])
 layer_path = Path(sys.argv[2])
 
 required_engine = {
+    "aws_exe_sys/finalizer/handler.py",
     "aws_exe_sys/init_job/handler.py",
     "aws_exe_sys/worker/handler.py",
     "boto3/__init__.py",
@@ -132,7 +133,7 @@ docker run --rm \
 	-e PYTHONPATH=/artifacts/engine.zip \
 	-v "$DIST_DIR:/artifacts:ro" \
 	public.ecr.aws/lambda/python:3.14 \
-	-c 'from aws_exe_sys.init_job.handler import handler as init_job_handler; from aws_exe_sys.worker.handler import handler as worker_handler; assert callable(init_job_handler) and callable(worker_handler)'
+	-c 'from aws_exe_sys.finalizer.handler import handler as finalizer_handler; from aws_exe_sys.init_job.handler import handler as init_job_handler; from aws_exe_sys.worker.handler import handler as worker_handler; assert callable(finalizer_handler) and callable(init_job_handler) and callable(worker_handler)'
 
 printf '%s\n' "=== Release artifacts ==="
 for artifact in "$DIST_DIR/engine.zip" "$DIST_DIR/sops-age-layer.zip"; do

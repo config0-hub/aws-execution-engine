@@ -3,7 +3,8 @@
 This repository documents a single generic execution interface:
 
 - **`init_job`** validates and dispatches work.
-- **`worker`** runs commands on the selected target and writes a terminal result to S3.
+- **`worker`** runs commands on the selected target and writes a detailed terminal result to S3.
+- **`finalizer`** atomically creates a missing failed fallback after a terminal CodeBuild run.
 
 ## Scope
 
@@ -29,15 +30,16 @@ The engine receives a pre-resolved command payload and has no stack-specific bus
 caller
   -> init_job
     -> validate payload + referenced resources
-      -> dispatch to selected target
-        -> worker (Lambda/CodeBuild)
-          -> execute command list
-            -> write ExecutionResult to done_endpoint
+      -> Lambda worker, or Standard Step Functions workflow for CodeBuild
+        -> worker executes command list and writes ExecutionResult
+        -> CodeBuild workflow invokes finalizer
+          -> preserve worker result or create missing failed fallback
 ```
 
 ## Notes
 
 - `done_endpoint` is the single completion marker and is treated as terminal when present.
+- Step Functions execution history is operational metadata, not the caller completion API.
 - `sops_type == null` runs with no secret decryption.
 - `sops_type == ssm` uses an SSM parameter at `sops_path`.
 - `sops_type == kms` uses SOPS metadata in the package, no explicit `sops_path` required.
