@@ -2,10 +2,13 @@
 
 `aws_exe_sys` is a small AWS-native execution adapter.
 
-It provides a two-step flow:
+It provides a caller-facing flow:
 
 1. `init_job` receives a **7-field payload** and dispatches to a target.
-2. `worker` executes the commands and writes an `ExecutionResult` to S3.
+2. The selected runtime writes an `ExecutionResult` to S3.
+
+CodeBuild requests are owned by a Standard Step Functions workflow, which waits for the build and invokes a
+fallback finalizer so a pre-worker CodeBuild failure cannot leave the caller waiting forever.
 
 Supported execution targets:
 - `lambda`
@@ -45,7 +48,9 @@ Set `additional_package_bucket_arns` and `additional_result_bucket_arns` when us
 - `init_job` validates payload shape and references (`s3://...`, optional SSM key).
 - `worker` downloads and unpacks the zip, applies SOPS if configured, then runs commands sequentially.
 - `worker` writes a terminal `ExecutionResult` to `done_endpoint` on success or execution failure.
-- If the result cannot be persisted, the worker raises instead of falsely reporting success.
+- For CodeBuild, Step Functions waits for the terminal build state and invokes `finalizer`.
+- `finalizer` atomically creates only a missing failed fallback; it never overwrites a worker result.
+- If the result cannot be persisted, the worker/finalizer raises instead of falsely reporting success.
 
 See `CONTRACT.md` for the exact response and result schema.
 
@@ -54,7 +59,7 @@ See `CONTRACT.md` for the exact response and result schema.
 The matching variable is required for each dispatch path:
 
 - `AWS_EXE_SYS_WORKER_LAMBDA` (for `lambda` dispatch)
-- `AWS_EXE_SYS_CODEBUILD_PROJECT` (for `codebuild` dispatch)
+- `AWS_EXE_SYS_CODEBUILD_STATE_MACHINE_ARN` (for `codebuild` dispatch)
 
 The Terraform deployment also sets the managed package and result bucket names:
 

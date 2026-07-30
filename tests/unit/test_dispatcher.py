@@ -99,53 +99,63 @@ class TestDispatchToLambda:
 
 
 class TestDispatchToCodeBuild:
+    @patch("aws_exe_sys.init_job.dispatcher.uuid.uuid4")
     @patch("aws_exe_sys.init_job.dispatcher.boto3")
-    def test_starts_codebuild_project(self, mock_boto3, monkeypatch):
-        monkeypatch.setenv("AWS_EXE_SYS_CODEBUILD_PROJECT", "my-cb-project")
+    def test_starts_standard_workflow(self, mock_boto3, mock_uuid4, monkeypatch):
+        monkeypatch.setenv("AWS_EXE_SYS_CODEBUILD_STATE_MACHINE_ARN", "arn:aws:states:us-east-1:123:stateMachine:xe")
+        mock_uuid4.return_value.hex = "unique123"
 
         mock_client = MagicMock()
-        mock_client.start_build.return_value = {"build": {"id": "build-123"}}
+        mock_client.start_execution.return_value = {"executionArn": "arn:aws:states:us-east-1:123:execution:xe:run"}
         mock_boto3.client.return_value = mock_client
 
         payload = _valid_payload(execution_target="codebuild")
         response = dispatch_to_codebuild(payload)
 
-        assert "build" in response
-        mock_boto3.client.assert_called_once_with("codebuild")
-        mock_client.start_build.assert_called_once()
+        assert "executionArn" in response
+        mock_boto3.client.assert_called_once_with("stepfunctions")
+        mock_client.start_execution.assert_called_once()
+        mock_client.start_build.assert_not_called()
 
+    @patch("aws_exe_sys.init_job.dispatcher.uuid.uuid4")
     @patch("aws_exe_sys.init_job.dispatcher.boto3")
-    def test_passes_all_7_fields_as_env_vars(self, mock_boto3, monkeypatch):
-        monkeypatch.setenv("AWS_EXE_SYS_CODEBUILD_PROJECT", "my-cb-project")
+    def test_passes_exactly_7_plain_string_fields(self, mock_boto3, mock_uuid4, monkeypatch):
+        state_machine_arn = "arn:aws:states:us-east-1:123:stateMachine:xe"
+        monkeypatch.setenv("AWS_EXE_SYS_CODEBUILD_STATE_MACHINE_ARN", state_machine_arn)
+        mock_uuid4.return_value.hex = "unique123"
 
         mock_client = MagicMock()
-        mock_client.start_build.return_value = {"build": {"id": "build-123"}}
+        mock_client.start_execution.return_value = {"executionArn": "execution-arn"}
         mock_boto3.client.return_value = mock_client
 
-        payload = _valid_payload(execution_target="codebuild")
+        payload = _valid_payload(execution_target="codebuild", sops_type=None, sops_path=None)
         dispatch_to_codebuild(payload)
 
-        call_kwargs = mock_client.start_build.call_args[1]
-        assert call_kwargs["projectName"] == "my-cb-project"
-
-        env_vars = call_kwargs["environmentVariablesOverride"]
-        env_names = {e["name"] for e in env_vars}
-        expected = {
-            "TRIGGER_ID",
-            "S3_PACKAGE_URI",
-            "SOPS_TYPE",
-            "SOPS_PATH",
-            "COMMANDS_B64",
-            "DONE_ENDPOINT",
-            "EXECUTION_TARGET",
+        call_kwargs = mock_client.start_execution.call_args.kwargs
+        assert call_kwargs["stateMachineArn"] == state_machine_arn
+        assert call_kwargs["name"] == "aws-exe-unique123"
+        sent_payload = json.loads(call_kwargs["input"])
+        assert set(sent_payload) == {
+            "trigger_id",
+            "s3_package_uri",
+            "sops_type",
+            "sops_path",
+            "commands_b64",
+            "done_endpoint",
+            "execution_target",
         }
-        assert env_names == expected
+        assert all(isinstance(value, str) for value in sent_payload.values())
+        assert sent_payload["sops_type"] == ""
+        assert sent_payload["sops_path"] == ""
 
-        # Verify values
-        env_map = {e["name"]: e["value"] for e in env_vars}
-        assert env_map["TRIGGER_ID"] == "trg-001"
-        assert env_map["S3_PACKAGE_URI"] == "s3://my-bucket/exec/trg-001/exec.zip"
-        assert all(e["type"] == "PLAINTEXT" for e in env_vars)
+    @patch("aws_exe_sys.init_job.dispatcher.boto3")
+    def test_missing_state_machine_configuration_fails_loudly(self, mock_boto3, monkeypatch):
+        monkeypatch.delenv("AWS_EXE_SYS_CODEBUILD_STATE_MACHINE_ARN", raising=False)
+
+        with pytest.raises(KeyError, match="AWS_EXE_SYS_CODEBUILD_STATE_MACHINE_ARN"):
+            dispatch_to_codebuild(_valid_payload(execution_target="codebuild"))
+
+        mock_boto3.client.assert_not_called()
 
 
 class TestDispatchRouting:
@@ -162,16 +172,17 @@ class TestDispatchRouting:
         mock_client.invoke.assert_called_once()
 
     @patch("aws_exe_sys.init_job.dispatcher.boto3")
-    def test_routes_to_codebuild(self, mock_boto3, monkeypatch):
-        monkeypatch.setenv("AWS_EXE_SYS_CODEBUILD_PROJECT", "my-cb-project")
+    def test_routes_to_codebuild_workflow(self, mock_boto3, monkeypatch):
+        monkeypatch.setenv("AWS_EXE_SYS_CODEBUILD_STATE_MACHINE_ARN", "arn:aws:states:us-east-1:123:stateMachine:xe")
         mock_client = MagicMock()
-        mock_client.start_build.return_value = {"build": {"id": "build-1"}}
+        mock_client.start_execution.return_value = {"executionArn": "execution-arn"}
         mock_boto3.client.return_value = mock_client
 
         payload = _valid_payload(execution_target="codebuild")
         result = dispatch(payload)
-        assert "build" in result
-        mock_client.start_build.assert_called_once()
+        assert "executionArn" in result
+        mock_client.start_execution.assert_called_once()
+        mock_client.start_build.assert_not_called()
 
     def test_unknown_target_raises(self):
         payload = _valid_payload(execution_target="ecs")

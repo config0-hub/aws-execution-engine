@@ -5,7 +5,7 @@ The repo includes Terraform in `infra/` for deploying the generic engine API.
 ## Directory layout
 
 - `infra/00-bootstrap`: S3 state backend bucket.
-- `infra/02-deploy`: Lambda, API Gateway, S3 buckets, IAM, and CodeBuild resources.
+- `infra/02-deploy`: Lambda, API Gateway, S3, IAM, CodeBuild, and Step Functions resources.
 
 ## Minimal local flow
 
@@ -14,6 +14,8 @@ The repo includes Terraform in `infra/` for deploying the generic engine API.
    ```bash
    bash scripts/build-release-zip.sh
    ```
+
+   `engine.zip` contains all three handlers: `init_job`, `worker`, and `finalizer`.
 
 2. Prepare the engine artifact references:
    - `project_prefix`
@@ -40,9 +42,32 @@ terraform init
 terraform apply
 ```
 
-By default, the deployed roles read packages from `<project_prefix>-internal` and write results to
+By default, deployed roles read packages from `<project_prefix>-internal` and write results to
 `<project_prefix>-done`. Configure the additional bucket ARN lists when payloads use other buckets.
 
-If you do not use the Terraform deployment, you can still invoke `init_job`/`worker` directly in AWS.
+## CodeBuild orchestration
+
+Deployments provision:
+
+- `<project_prefix>-codebuild`: Standard Step Functions state machine
+- `<project_prefix>-worker`: managed CodeBuild worker project
+- `<project_prefix>-finalizer`: missing-result fallback Lambda
+
+Terraform wires `AWS_EXE_SYS_CODEBUILD_STATE_MACHINE_ARN` into `init_job`. CodeBuild submission is accepted
+when `StartExecution` succeeds. The workflow then waits for CodeBuild and invokes the finalizer. The worker
+writes the detailed result; the finalizer only conditionally creates a missing failed result.
+
+Useful outputs are `codebuild_state_machine_arn`, `codebuild_state_machine_name`, and
+`finalizer_function_name`. These are operator metadata and are not caller payload fields.
+
+For a safe rollout, first deploy and directly test the finalizer and state machine, then update the `init_job`
+environment/role and publish the dispatcher switch. For rollback, restore direct CodeBuild dispatch and its
+scoped `codebuild:StartBuild` permission; do not alter existing terminal markers.
+
+If you do not use the Terraform deployment, you must provision the state machine/finalizer and set the two
+dispatch environment variables yourself:
+
+- `AWS_EXE_SYS_WORKER_LAMBDA`
+- `AWS_EXE_SYS_CODEBUILD_STATE_MACHINE_ARN`
 
 See `infra/` for full module details.

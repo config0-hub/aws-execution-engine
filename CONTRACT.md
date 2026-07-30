@@ -3,7 +3,8 @@
 Version: 3.0
 
 `aws_exe_sys` is a generic command runner. It accepts a prepared command payload,
-executes it on a selected target (`lambda` or `codebuild`), and writes one terminal result to S3.
+executes it on a selected target (`lambda` or `codebuild`), and uses one S3 `ExecutionResult` object as the
+terminal marker.
 
 Version 3.0 removes the unused `ssm` execution target. The payload still contains exactly seven fields.
 
@@ -37,13 +38,16 @@ Acknowledgement on dispatch:
 `init_job` validates the payload and routes to:
 
 - `lambda`: asynchronous invocation of `AWS_EXE_SYS_WORKER_LAMBDA`.
-- `codebuild`: start a build in `AWS_EXE_SYS_CODEBUILD_PROJECT` with all seven fields as environment variables.
+- `codebuild`: asynchronous start of the Standard workflow in `AWS_EXE_SYS_CODEBUILD_STATE_MACHINE_ARN`.
+  The workflow starts the managed CodeBuild project with all seven fields as plain-string CodeBuild
+  environment overrides, waits for a terminal build state, and invokes the finalizer.
 
-The payload is passed as plain string values to each target.
+The payload is passed as plain string values to each target. Successful `init_job` acknowledgement for
+CodeBuild means Step Functions accepted the execution; it does not mean the build completed.
 
 ## Result
 
-`worker` writes one `ExecutionResult` object to `done_endpoint`:
+The primary worker writes the detailed `ExecutionResult` object to `done_endpoint`:
 
 ```json
 {
@@ -63,3 +67,9 @@ The payload is passed as plain string values to each target.
 ```
 
 Presence of this object is terminal. A result-write failure is raised by the worker rather than being reported as successful execution.
+
+For CodeBuild, the worker remains the primary writer of the detailed result. After CodeBuild reaches a
+terminal state, the finalizer performs an atomic conditional S3 write (`If-None-Match: *`). It preserves an
+existing worker result. If no result exists, it writes a canonical `failed` result with an empty `steps` list
+and a stable `codebuild_*_without_result` error classification. A successful build without a worker marker is
+therefore a failed contract outcome. Other S3 errors propagate and fail the Step Functions execution.

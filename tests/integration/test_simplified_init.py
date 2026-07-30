@@ -78,7 +78,8 @@ class TestInitValidPayloadDispatch:
         assert len(sent) == 7
 
     def test_dispatch_to_codebuild(self, monkeypatch):
-        monkeypatch.setenv("AWS_EXE_SYS_CODEBUILD_PROJECT", "my-cb-project")
+        state_machine_arn = "arn:aws:states:us-east-1:123:stateMachine:xe"
+        monkeypatch.setenv("AWS_EXE_SYS_CODEBUILD_STATE_MACHINE_ARN", state_machine_arn)
 
         mock_s3 = MagicMock()
         mock_s3.head_object.return_value = {}
@@ -86,25 +87,26 @@ class TestInitValidPayloadDispatch:
         mock_ssm = MagicMock()
         mock_ssm.get_parameter.return_value = {"Parameter": {"Value": "age-key"}}
 
-        mock_cb = MagicMock()
-        mock_cb.start_build.return_value = {"build": {"id": "build-123"}}
+        mock_stepfunctions = MagicMock()
+        mock_stepfunctions.start_execution.return_value = {"executionArn": "execution-arn"}
 
         with (
             patch("aws_exe_sys.init_job.validate.boto3") as mock_val_boto3,
             patch("aws_exe_sys.init_job.dispatcher.boto3") as mock_disp_boto3,
         ):
             mock_val_boto3.client.side_effect = _mock_boto3_client({"s3": mock_s3, "ssm": mock_ssm})
-            mock_disp_boto3.client.return_value = mock_cb
+            mock_disp_boto3.client.return_value = mock_stepfunctions
 
             result = handler(_valid_event(execution_target="codebuild"))
 
-        assert result["status"] == "ok"
-        mock_cb.start_build.assert_called_once()
-        call_kwargs = mock_cb.start_build.call_args[1]
-        assert call_kwargs["projectName"] == "my-cb-project"
-        env_names = {e["name"] for e in call_kwargs["environmentVariablesOverride"]}
-        assert "TRIGGER_ID" in env_names
-        assert len(env_names) == 7
+        assert result == {"status": "ok", "trigger_id": "trg-int-001"}
+        mock_stepfunctions.start_execution.assert_called_once()
+        call_kwargs = mock_stepfunctions.start_execution.call_args.kwargs
+        assert call_kwargs["stateMachineArn"] == state_machine_arn
+        sent = json.loads(call_kwargs["input"])
+        assert set(sent) == set(_valid_event())
+        assert all(isinstance(value, str) for value in sent.values())
+        mock_stepfunctions.start_build.assert_not_called()
 
 
 class TestInitInvalidPayload:

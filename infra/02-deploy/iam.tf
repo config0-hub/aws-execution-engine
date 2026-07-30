@@ -59,8 +59,8 @@ resource "aws_iam_role_policy" "init_job" {
       },
       {
         Effect   = "Allow"
-        Action   = ["codebuild:StartBuild"]
-        Resource = aws_codebuild_project.worker.arn
+        Action   = ["states:StartExecution"]
+        Resource = aws_sfn_state_machine.codebuild.arn
       },
     ]
   })
@@ -126,6 +126,40 @@ resource "aws_iam_role_policy" "worker" {
 resource "aws_iam_role_policy" "worker_logs" {
   name   = "logs"
   role   = aws_iam_role.worker.id
+  policy = data.aws_iam_policy_document.lambda_logs.json
+}
+
+# ============================================================
+# finalizer
+# ============================================================
+
+resource "aws_iam_role" "finalizer" {
+  name               = "${local.prefix}-finalizer"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
+}
+
+resource "aws_iam_role_policy" "finalizer" {
+  name = "${local.prefix}-finalizer"
+  role = aws_iam_role.finalizer.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = ["s3:PutObject"]
+        Resource = concat(
+          ["${aws_s3_bucket.done.arn}/*"],
+          [for arn in var.additional_result_bucket_arns : "${arn}/*"],
+        )
+      },
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "finalizer_logs" {
+  name   = "logs"
+  role   = aws_iam_role.finalizer.id
   policy = data.aws_iam_policy_document.lambda_logs.json
 }
 

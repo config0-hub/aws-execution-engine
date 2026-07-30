@@ -16,16 +16,18 @@ output "api_gateway_id" {
 output "lambda_function_names" {
   description = "Map of Lambda function names"
   value = {
-    init_job = aws_lambda_function.init_job.function_name
-    worker   = aws_lambda_function.worker.function_name
+    init_job  = aws_lambda_function.init_job.function_name
+    worker    = aws_lambda_function.worker.function_name
+    finalizer = aws_lambda_function.finalizer.function_name
   }
 }
 
 output "lambda_function_arns" {
   description = "Map of Lambda function ARNs"
   value = {
-    init_job = aws_lambda_function.init_job.arn
-    worker   = aws_lambda_function.worker.arn
+    init_job  = aws_lambda_function.init_job.arn
+    worker    = aws_lambda_function.worker.arn
+    finalizer = aws_lambda_function.finalizer.arn
   }
 }
 
@@ -52,6 +54,21 @@ output "worker_function_name" {
 output "worker_function_arn" {
   description = "worker Lambda function ARN"
   value       = aws_lambda_function.worker.arn
+}
+
+output "finalizer_function_name" {
+  description = "CodeBuild result finalizer Lambda function name"
+  value       = aws_lambda_function.finalizer.function_name
+}
+
+output "codebuild_state_machine_arn" {
+  description = "CodeBuild orchestration state machine ARN"
+  value       = aws_sfn_state_machine.codebuild.arn
+}
+
+output "codebuild_state_machine_name" {
+  description = "CodeBuild orchestration state machine name"
+  value       = aws_sfn_state_machine.codebuild.name
 }
 
 output "s3_bucket_names" {
