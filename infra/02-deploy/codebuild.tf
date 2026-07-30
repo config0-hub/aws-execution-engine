@@ -8,25 +8,10 @@ resource "aws_codebuild_project" "worker" {
 
   environment {
     compute_type                = local.codebuild_compute
-    image                       = local.image_uri
+    image                       = "aws/codebuild/standard:7.0"
     type                        = "LINUX_CONTAINER"
     privileged_mode             = false
-    image_pull_credentials_type = "SERVICE_ROLE"
-
-    environment_variable {
-      name  = "AWS_EXE_SYS_ORDERS_TABLE"
-      value = aws_dynamodb_table.orders.name
-    }
-
-    environment_variable {
-      name  = "AWS_EXE_SYS_ORDER_EVENTS_TABLE"
-      value = aws_dynamodb_table.order_events.name
-    }
-
-    environment_variable {
-      name  = "AWS_EXE_SYS_LOCKS_TABLE"
-      value = aws_dynamodb_table.orchestrator_locks.name
-    }
+    image_pull_credentials_type = "CODEBUILD"
 
     environment_variable {
       name  = "AWS_EXE_SYS_INTERNAL_BUCKET"
@@ -37,10 +22,42 @@ resource "aws_codebuild_project" "worker" {
       name  = "AWS_EXE_SYS_DONE_BUCKET"
       value = aws_s3_bucket.done.id
     }
+
+    environment_variable {
+      name  = "ENGINE_ZIP_S3_BUCKET"
+      value = var.engine_zip_s3_bucket
+    }
+
+    environment_variable {
+      name  = "ENGINE_ZIP_S3_KEY"
+      value = var.engine_zip_s3_key
+    }
+
+    environment_variable {
+      name  = "SOPS_URL"
+      value = "https://github.com/getsops/sops/releases/download/v3.9.4/sops-v3.9.4.linux.amd64"
+    }
+
+    environment_variable {
+      name  = "AGE_URL"
+      value = "https://dl.filippo.io/age/v1.2.1?for=linux/amd64"
+    }
   }
 
   source {
     type      = "NO_SOURCE"
-    buildspec = "version: 0.2\nphases:\n  build:\n    commands:\n      - /entrypoint.sh\n"
+    buildspec = <<-BUILDSPEC
+      version: 0.2
+      phases:
+        install:
+          commands:
+            - curl -fsSL "$SOPS_URL" -o /usr/local/bin/sops && chmod +x /usr/local/bin/sops
+            - curl -fsSL "$AGE_URL" | tar xz --strip-components=1 -C /usr/local/bin age/age age/age-keygen
+        build:
+          commands:
+            - aws s3 cp "s3://$ENGINE_ZIP_S3_BUCKET/$ENGINE_ZIP_S3_KEY" /tmp/engine.zip
+            - mkdir -p /work && unzip -q /tmp/engine.zip -d /work
+            - ENGINE_TASK_ROOT=/work bash /work/aws_exe_sys/worker/entrypoint.sh
+    BUILDSPEC
   }
 }

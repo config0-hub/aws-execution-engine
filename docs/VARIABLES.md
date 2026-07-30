@@ -1,289 +1,50 @@
-# Variables Reference
+# Payload variables
 
-Complete reference for `job_parameters_b64` — the base64-encoded payload sent to the `init_job` Lambda (via `POST /init`) or the `ssm_config` Lambda (via `POST /ssm`).
+## SimplePayload fields
 
----
+```text
+trigger_id:        string  (required)
+s3_package_uri:    s3://.../exec.zip
+sops_type:         null | "ssm" | "kms"
+sops_path:         string | null
+commands_b64:      base64(JSON string array)
+done_endpoint:     s3://.../result.json
+execution_target:   "lambda" | "codebuild"
+```
 
-## Global (Job-Level)
+## Rules
 
-| Variable | Required | Notes |
-|---|---|---|
-| `git_repo` | YES | Source repo (org/repo) — required for git clones |
-| `git_token_location` | YES | `aws:::ssm:<path>` — base64-encoded JSON dict (see [SSM credential contract](#ssm-credential-contract)) |
-| `git_ssh_key_location` | NO | Alternative to token for SSH clone (same SSM contract) |
-| `username` | YES | Used in flow_id generation; or derived from git identity |
-| `flow_label` | NO | Suffix for flow_id. Defaults to `"exec"` |
-| `presign_expiry` | NO | Presigned URL expiry in seconds. Default: 7200 (2 hours) |
-| `job_timeout` | NO | Timeout for the entire job (all orders). Default: 3600 |
+- `sops_path` is required only when `sops_type == "ssm"`.
+- `commands_b64` must decode to a non-empty array of strings.
+- `s3_package_uri` and `done_endpoint` must be valid S3 URIs.
+- `execution_target` must be one of: `lambda`, `codebuild`.
+- `sops_type="ssm"` refers only to SOPS key storage in Parameter Store; it is not an execution target.
 
-> **PR comments are the caller's responsibility.** The engine exposes `aws_exe_sys/common/vcs/` as a library for callers that need it, but does not post comments itself. PR number / issue number / search tag fields are not part of the payload contract.
+## Command list example
 
----
+```python
+import base64, json
+commands = ["echo hello", "ls -la"]
+commands_b64 = base64.b64encode(json.dumps(commands).encode()).decode()
+```
 
-## Per Order
-
-| Variable | Required | Notes |
-|---|---|---|
-| `cmds` | YES | List of shell commands, pre-resolved by upstream |
-| `timeout` | YES | Per-order timeout in seconds |
-| `order_name` | NO | Derived from folder/cmd if not provided |
-| `git_repo` | NO | Defaults to global `git_repo` |
-| `git_folder` | NO | Subfolder within repo to use as working directory |
-| `s3_location` | NO | S3 zip of execution files (alternative to git) |
-| `env_vars` | NO | Dict of extra environment variables |
-| `ssm_paths` | NO | List of SSM Parameter Store paths — each value must be a base64-encoded JSON dict. See [SSM credential contract](#ssm-credential-contract). |
-| `secret_manager_paths` | NO | List of Secrets Manager paths. JSON-dict secrets expand into multiple env vars; plain-string secrets use a path-derived key. See [Secrets Manager expansion](#secrets-manager-expansion). |
-| `sops_key` | NO | SOPS encryption key. Auto-generated temp key if not provided |
-| `execution_target` | NO | `"lambda"` (faster, 10 min limit), `"codebuild"` (long-running), or `"ssm"` (SSM Run Command). Default: `"codebuild"` |
-| `ssm_targets` | NO * | Target instances for SSM execution. Object with `instance_ids` (list) or `tags` (dict). * Required when `execution_target` is `"ssm"` |
-| `ssm_document_name` | NO | SSM Document to use. Default: `"aws-exe-sys-run-commands"` |
-| `queue_id` | NO | Auto-generated if not provided. Used for dependency references |
-| `dependencies` | NO | List of `queue_id` values this order depends on |
-| `must_succeed` | NO | If `true` (default), failure of this order fails the entire job |
-
----
-
-## Example Payload
+## Result payload (`done_endpoint` object)
 
 ```json
 {
-  "git_repo": "org/infra-repo",
-  "git_token_location": "aws:::ssm:/exe-sys/github-token",
-  "username": "gear",
-  "flow_label": "plan",
-  "orders": [
+  "trigger_id": "string",
+  "status": "succeeded" | "failed",
+  "steps": [
     {
-      "order_name": "deploy-vpc",
-      "cmds": ["tofu init", "tofu plan -out=plan.out"],
-      "timeout": 300,
-      "git_folder": "terraform/vpc",
-      "env_vars": {"TF_VAR_env": "staging"},
-      "ssm_paths": ["/infra/staging/db-password"],
-      "execution_target": "lambda",
-      "queue_id": "vpc-plan"
-    },
-    {
-      "order_name": "deploy-rds",
-      "cmds": ["tofu init", "tofu plan -out=plan.out"],
-      "timeout": 300,
-      "git_folder": "terraform/rds",
-      "secret_manager_paths": ["infra/staging/rds-creds"],
-      "execution_target": "lambda",
-      "queue_id": "rds-plan",
-      "dependencies": ["vpc-plan"]
-    },
-    {
-      "order_name": "run-migrations",
-      "cmds": ["./scripts/migrate.sh"],
-      "timeout": 600,
-      "s3_location": "s3://deploy-artifacts/migrations/v2.3.zip",
-      "execution_target": "codebuild",
-      "dependencies": ["rds-plan"],
-      "must_succeed": false
+      "step_name": "step-0",
+      "status": "succeeded",
+      "exit_code": 0,
+      "duration_seconds": 1.23,
+      "output": "combined output"
     }
-  ]
+  ],
+  "error": "string when failed"
 }
 ```
 
-This payload is base64-encoded before being sent to the `init_job` Lambda via `POST /init`.
-
----
-
-## Auto-Generated Values
-
-The following are generated by the system if not provided in the payload:
-
-| Value | Generation |
-|---|---|
-| `trace_id` | Random hex string (e.g. `a3f7b2c1`) |
-| `run_id` | UUID |
-| `flow_id` | `<username>:<trace_id>-<flow_label>` |
-| `done_endpt` | `s3://<done-bucket>/<run_id>/done` |
-| `queue_id` (per order) | Auto-incremented or UUID |
-| `sops_key` (per order) | Temporary KMS key or age key |
-| `order_name` (per order) | Derived from `git_folder` or first cmd |
-
----
-
-## Callback URL (Internal)
-
-Generated during repackage (Part 1, Step 2) for each order:
-
-```
-Presigned S3 PUT URL pointing to:
-  s3://<internal-bucket>/tmp/callbacks/runs/<run_id>/<order_num>/result.json
-
-Baked into SOPS bundle as CALLBACK_URL env var.
-Also stored in orders DynamoDB table as callback_url field.
-Expiry: presign_expiry (default 2 hours).
-```
-
----
-
-## Done Endpoint (External)
-
-Written by orchestrator when all orders complete:
-
-```
-s3://<done-bucket>/<run_id>/done
-
-Content:
-{
-  "status": "succeeded/failed/timed_out",
-  "summary": {
-    "succeeded": 3,
-    "failed": 1,
-    "timed_out": 0
-  }
-}
-```
-
-Separate S3 bucket from internal — no access to order data.
-
----
-
-## SSM Job Payload (POST /ssm)
-
-SSM orders use a separate entry point (`POST /ssm` -> `ssm_config` Lambda) with `SsmJob`/`SsmOrder` models. These orders do not use SOPS encryption -- credentials are passed as plain SSM command parameters.
-
-### SsmJob (Job-Level)
-
-| Variable | Required | Notes |
-|---|---|---|
-| `username` | YES | Used in flow_id generation |
-| `git_repo` | NO | Repo to clone for code source |
-| `git_token_location` | NO | `aws:::ssm:<path>` or `aws:::secretd:<path>` |
-| `git_ssh_key_location` | NO | Alternative to token for SSH clone |
-| `commit_hash` | NO | Specific commit to checkout |
-| `flow_label` | NO | Suffix for flow_id. Defaults to `"ssm"` |
-| `presign_expiry` | NO | Presigned URL expiry in seconds. Default: 7200 |
-| `job_timeout` | NO | Timeout for the entire job. Default: 3600 |
-
-### SsmOrder (Per Order)
-
-| Variable | Required | Notes |
-|---|---|---|
-| `cmds` | YES | List of shell commands |
-| `timeout` | YES | Per-order timeout in seconds |
-| `ssm_targets` | YES | Target instances: `{"instance_ids": [...]}` or `{"tags": {"Key": "Value"}}` |
-| `order_name` | NO | Derived if not provided |
-| `git_repo` | NO | Defaults to job-level `git_repo` |
-| `git_folder` | NO | Subfolder within repo |
-| `commit_hash` | NO | Specific commit to checkout |
-| `s3_location` | NO | S3 zip of execution files (alternative to git) |
-| `env_vars` | NO | Dict of extra environment variables |
-| `ssm_paths` | NO | List of SSM Parameter Store paths — each value must be a base64-encoded JSON dict. See [SSM credential contract](#ssm-credential-contract). |
-| `secret_manager_paths` | NO | List of Secrets Manager paths. JSON-dict secrets expand into multiple env vars; plain-string secrets use a path-derived key. See [Secrets Manager expansion](#secrets-manager-expansion). |
-| `ssm_document_name` | NO | SSM Document to use. Default: `"aws-exe-sys-run-commands"` |
-| `queue_id` | NO | Auto-generated if not provided |
-| `dependencies` | NO | List of `queue_id` values this order depends on |
-| `must_succeed` | NO | Default: `true` |
-
-### SSM Example Payload
-
-```json
-{
-  "username": "gear",
-  "git_repo": "org/infra-repo",
-  "git_token_location": "aws:::ssm:/exe-sys/github-token",
-  "orders": [
-    {
-      "order_name": "patch-webservers",
-      "cmds": ["yum update -y", "systemctl restart httpd"],
-      "timeout": 300,
-      "ssm_targets": {
-        "tags": {"Environment": "staging", "Role": "webserver"}
-      },
-      "env_vars": {"LOG_LEVEL": "info"},
-      "queue_id": "patch-web"
-    },
-    {
-      "order_name": "run-healthcheck",
-      "cmds": ["curl -sf http://localhost/health"],
-      "timeout": 60,
-      "ssm_targets": {
-        "instance_ids": ["i-0abc123def456", "i-0def789abc012"]
-      },
-      "dependencies": ["patch-web"]
-    }
-  ]
-}
-```
-
-This payload is base64-encoded before being sent to the `ssm_config` Lambda via `POST /ssm`:
-
-```bash
-curl -X POST "$API_GATEWAY_URL/ssm" \
-  -H "Content-Type: application/json" \
-  -d '{"job_parameters_b64": "<base64-encoded SSM job payload>"}'
-```
-
-### Key Differences from init_job Payload
-
-- `ssm_targets` is required on every order (instance_ids or tags)
-- No `sops_key` field -- SSM orders do not use SOPS encryption
-- No `execution_target` field -- all SSM orders are automatically set to `execution_target: "ssm"`
-- `flow_label` defaults to `"ssm"` instead of `"exec"`
-
----
-
-## SSM Credential Contract
-
-SSM values referenced by `git_token_location` or listed in `ssm_paths` **must be base64-encoded JSON objects with string values**. The engine will `base64-decode → JSON-parse → merge into env_vars`.
-
-For `git_token_location`, the first value in the decoded dict is used as the token (dict ordering is insertion order).
-
-### Producing a value
-
-```bash
-# Single-field secret (git token)
-echo -n '{"token": "ghp_xxx"}' | base64
-# → eyJ0b2tlbiI6ICJnaHBfeHh4In0=
-
-# Multi-field secret (DB credentials)
-echo -n '{"DB_USER": "alice", "DB_PASS": "hunter2"}' | base64
-# → eyJEQl9VU0VSIjogImFsaWNlIiwgIkRCX1BBU1MiOiAiaHVudGVyMiJ9
-```
-
-Then store the base64 string under the SSM path you pass to `git_token_location` / `ssm_paths`:
-
-```bash
-aws ssm put-parameter \
-  --name /exe-sys/github-token \
-  --type SecureString \
-  --value "$(echo -n '{"token": "ghp_xxx"}' | base64)"
-```
-
-### Footgun
-
-If the SSM value is a raw string (not base64 JSON), decoding raises `ValueError` at fetch time and the order fails. There is no silent fallback — either the whole contract or a clear error.
-
----
-
-## Secrets Manager Expansion
-
-Secrets referenced via `secret_manager_paths` behave differently from SSM paths:
-
-- **If `SecretString` parses as a JSON object** → every key/value is added to the order's env vars (effectively `result.update(parsed)`).
-- **If `SecretString` is a plain string** → a single env var is added whose name is derived from the secret path (last path segment, upper-cased, hyphens replaced with underscores).
-
-### JSON-dict example
-
-```
-Secret path:   /prod/db/creds
-SecretString:  {"username": "alice", "password": "hunter2"}
-Result env vars:
-  username=alice
-  password=hunter2
-```
-
-### Plain-string example
-
-```
-Secret path:   /prod/api_token
-SecretString:  "abc123"
-Result env var:
-  PROD_API_TOKEN=abc123   # key derived from path
-```
-
-The two modes can be mixed within a single order — one secret can expand into many env vars, another can contribute a single path-derived key.
+`error` is omitted when execution succeeds.

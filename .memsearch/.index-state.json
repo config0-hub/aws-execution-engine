@@ -1,0 +1,18 @@
+{
+  "collection": "ms_aws_execution_engine_da03a667",
+  "failed_files": [],
+  "indexed_chunks": 1,
+  "indexed_files": 2,
+  "last_completed_at": "2026-07-30T06:37:06.169251Z",
+  "last_started_at": "2026-07-30T06:37:04.572322Z",
+  "last_success_at": "2026-07-30T06:37:06.169251Z",
+  "milvus_uri": "~/.memsearch/milvus.db",
+  "operation": "index",
+  "paths": [
+    "/home/gary/project/repos/aws-execution-engine/.memsearch/memory"
+  ],
+  "schema_version": 1,
+  "status": "ok",
+  "total_files": 2,
+  "updated_at": "2026-07-30T06:37:06.169251Z"
+}

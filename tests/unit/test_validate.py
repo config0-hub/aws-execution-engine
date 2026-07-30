@@ -1,106 +1,124 @@
-"""Unit tests for aws_exe_sys/init_job/validate.py."""
+"""Unit tests for aws_exe_sys/init_job/validate.py (resource validation)."""
 
+import base64
+import json
+
+import boto3
+from moto import mock_aws
 import pytest
 
-from aws_exe_sys.common.models import Job, Order
-from aws_exe_sys.init_job.validate import validate_orders
+from aws_exe_sys.common.payload import SimplePayload
+from aws_exe_sys.init_job.validate import validate_payload_resources
 
 
-def _make_job(orders=None, **kwargs):
+@pytest.fixture(autouse=True)
+def _aws_env(monkeypatch):
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+
+
+def _b64_cmds(cmds: list[str]) -> str:
+    return base64.b64encode(json.dumps(cmds).encode()).decode()
+
+
+def _valid_payload(**overrides) -> SimplePayload:
     defaults = {
-        "git_repo": "org/repo",
-        "git_token_location": "aws:::ssm:/token",
-        "username": "testuser",
+        "trigger_id": "trg-001",
+        "s3_package_uri": "s3://test-bucket/exec/trg-001/exec.zip",
+        "sops_type": None,
+        "sops_path": None,
+        "commands_b64": _b64_cmds(["echo hello"]),
+        "done_endpoint": "s3://done-bucket/trg-001/result.json",
+        "execution_target": "lambda",
     }
-    defaults.update(kwargs)
-    return Job(orders=orders or [], **defaults)
+    defaults.update(overrides)
+    return SimplePayload(**defaults)
 
 
-def _make_order(**kwargs):
-    defaults = {
-        "cmds": ["echo hello"],
-        "timeout": 300,
-    }
-    defaults.update(kwargs)
-    return Order(**defaults)
+@mock_aws
+class TestValidatePayloadResourcesAllValid:
+    def test_s3_exists_no_sops_returns_empty(self):
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket="test-bucket")
+        s3.put_object(Bucket="test-bucket", Key="exec/trg-001/exec.zip", Body=b"data")
 
-
-class TestValidateOrders:
-    def test_valid_orders_pass(self):
-        job = _make_job(orders=[_make_order(), _make_order(order_name="deploy-rds")])
-        errors = validate_orders(job)
+        payload = _valid_payload()
+        errors = validate_payload_resources(payload)
         assert errors == []
 
-    def test_no_orders_fails(self):
-        job = _make_job(orders=[])
-        errors = validate_orders(job)
-        assert len(errors) == 1
-        assert "no orders" in errors[0].lower()
+    def test_s3_exists_and_ssm_exists_returns_empty(self):
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket="test-bucket")
+        s3.put_object(Bucket="test-bucket", Key="exec/trg-001/exec.zip", Body=b"data")
 
-    def test_missing_cmds_fails(self):
-        job = _make_job(orders=[_make_order(cmds=[])])
-        errors = validate_orders(job)
-        assert len(errors) == 1
-        assert "cmds" in errors[0].lower()
-
-    def test_missing_timeout_fails(self):
-        job = _make_job(orders=[_make_order(timeout=0)])
-        errors = validate_orders(job)
-        assert len(errors) == 1
-        assert "timeout" in errors[0].lower()
-
-    def test_missing_code_source_fails(self):
-        job = _make_job(
-            git_repo="",
-            git_token_location="",
-            orders=[_make_order()],
+        ssm = boto3.client("ssm", region_name="us-east-1")
+        ssm.put_parameter(
+            Name="/exe-sys/sops-keys/run1/001",
+            Value="private-key-content",
+            Type="SecureString",
         )
-        errors = validate_orders(job)
-        assert len(errors) == 1
-        assert "code source" in errors[0].lower()
 
-    def test_s3_location_satisfies_code_source(self):
-        job = _make_job(
-            git_repo="",
-            git_token_location="",
-            orders=[_make_order(s3_location="s3://bucket/code.zip")],
+        payload = _valid_payload(
+            sops_type="ssm",
+            sops_path="/exe-sys/sops-keys/run1/001",
         )
-        errors = validate_orders(job)
+        errors = validate_payload_resources(payload)
         assert errors == []
 
-    def test_fail_fast_returns_first_error(self):
-        job = _make_job(orders=[
-            _make_order(cmds=[]),  # invalid
-            _make_order(timeout=0),  # also invalid
-        ])
-        errors = validate_orders(job)
-        # Only returns first error (fail-fast)
+
+@mock_aws
+class TestValidatePayloadResourcesS3Failure:
+    def test_s3_object_missing_returns_error(self):
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket="test-bucket")
+        # Do NOT put the object
+
+        payload = _valid_payload()
+        errors = validate_payload_resources(payload)
         assert len(errors) == 1
-        assert "cmds" in errors[0].lower()
+        assert "S3 object not found" in errors[0]
 
-    def test_order_name_in_error_message(self):
-        job = _make_job(orders=[_make_order(order_name="deploy-vpc", cmds=[])])
-        errors = validate_orders(job)
-        assert "deploy-vpc" in errors[0]
-
-    def test_invalid_execution_target_fails(self):
-        job = _make_job(orders=[_make_order(execution_target="kubernetes")])
-        errors = validate_orders(job)
+    def test_s3_bucket_missing_returns_error(self):
+        # Don't create the bucket at all
+        payload = _valid_payload(s3_package_uri="s3://nonexistent-bucket/key")
+        errors = validate_payload_resources(payload)
         assert len(errors) == 1
-        assert "execution_target" in errors[0].lower()
-        assert "kubernetes" in errors[0]
+        assert "S3 object not found" in errors[0]
 
-    def test_valid_execution_target_lambda(self):
-        job = _make_job(orders=[_make_order(execution_target="lambda")])
-        errors = validate_orders(job)
+
+@mock_aws
+class TestValidatePayloadResourcesSSMFailure:
+    def test_ssm_parameter_missing_returns_error(self):
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket="test-bucket")
+        s3.put_object(Bucket="test-bucket", Key="exec/trg-001/exec.zip", Body=b"data")
+
+        payload = _valid_payload(
+            sops_type="ssm",
+            sops_path="/exe-sys/sops-keys/missing/001",
+        )
+        errors = validate_payload_resources(payload)
+        assert len(errors) == 1
+        assert "SSM parameter not found" in errors[0]
+
+
+@mock_aws
+class TestValidatePayloadResourcesSSMSkipped:
+    def test_sops_type_none_skips_ssm_check(self):
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket="test-bucket")
+        s3.put_object(Bucket="test-bucket", Key="exec/trg-001/exec.zip", Body=b"data")
+
+        payload = _valid_payload(sops_type=None, sops_path=None)
+        errors = validate_payload_resources(payload)
         assert errors == []
 
-    def test_valid_execution_target_codebuild(self):
-        job = _make_job(orders=[_make_order(execution_target="codebuild")])
-        errors = validate_orders(job)
-        assert errors == []
+    def test_sops_type_kms_skips_ssm_check(self):
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket="test-bucket")
+        s3.put_object(Bucket="test-bucket", Key="exec/trg-001/exec.zip", Body=b"data")
 
-    def test_valid_execution_target_ssm(self):
-        job = _make_job(orders=[_make_order(execution_target="ssm")])
-        errors = validate_orders(job)
+        payload = _valid_payload(sops_type="kms", sops_path="/some/kms/key")
+        errors = validate_payload_resources(payload)
         assert errors == []

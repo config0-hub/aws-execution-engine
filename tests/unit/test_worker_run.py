@@ -1,444 +1,535 @@
-"""Unit tests for aws_exe_sys/worker/run.py."""
+"""Unit tests for aws_exe_sys/worker/run.py — simplified single-entrypoint worker."""
 
+import base64
 import json
 import os
-import tempfile
+from pathlib import Path
+from unittest.mock import patch
 import zipfile
-from unittest.mock import patch, MagicMock, call
 
 import pytest
 
+from aws_exe_sys.common.result_writer import ExecutionResult, StepResult
 from aws_exe_sys.common.sops import SopsKeyExpired
-from aws_exe_sys.worker.run import (
-    run,
-    _execute_commands,
-    _setup_events_dir,
-    _collect_and_write_events,
-)
+from aws_exe_sys.worker.run import cleanup_stale_workdirs, run
 
 
-class TestExecuteCommands:
-    def test_successful_command(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            status, log = _execute_commands(["echo hello"], tmpdir)
-            assert status == "succeeded"
-            assert "hello" in log
+def _encode_commands(commands: list[str]) -> str:
+    """Base64-encode a JSON array of commands."""
+    return base64.b64encode(json.dumps(commands).encode()).decode()
 
-    def test_failed_command(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            status, log = _execute_commands(["exit 1"], tmpdir)
-            assert status == "failed"
-            assert "Exit code: 1" in log
 
-    def test_multiple_commands_in_order(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            status, log = _execute_commands(
-                ["echo first", "echo second"],
-                tmpdir,
+DONE_ENDPOINT = "s3://test-bucket/results/trigger-1/done.json"
+
+
+class TestScratchCleanup:
+    """Worker scratch cleanup is isolated to worker-owned run directories."""
+
+    @patch("aws_exe_sys.worker.run.tempfile.gettempdir")
+    def test_cleanup_removes_only_owned_directories(
+        self,
+        mock_gettempdir,
+        tmp_path,
+    ):
+        mock_gettempdir.return_value = str(tmp_path)
+        scratch_root = tmp_path / "aws-exe-sys-worker"
+        owned_first = scratch_root / "run-first"
+        owned_second = scratch_root / "run-second"
+        foreign_dir = scratch_root / "foreign-dir"
+        matching_file = scratch_root / "run-foreign-file"
+        outside_file = tmp_path / "foreign-file"
+
+        owned_first.mkdir(parents=True)
+        owned_second.mkdir()
+        foreign_dir.mkdir()
+        matching_file.write_text("not a worker directory")
+        outside_file.write_text("outside the worker scratch root")
+        (owned_first / "provider-cache").write_text("stale")
+
+        cleanup_stale_workdirs()
+
+        assert not owned_first.exists()
+        assert not owned_second.exists()
+        assert foreign_dir.is_dir()
+        assert matching_file.read_text() == "not a worker directory"
+        assert outside_file.read_text() == "outside the worker scratch root"
+
+    @patch("aws_exe_sys.worker.run.shutil.rmtree")
+    @patch("aws_exe_sys.worker.run.tempfile.gettempdir")
+    def test_cleanup_failure_raises(
+        self,
+        mock_gettempdir,
+        mock_rmtree,
+        tmp_path,
+    ):
+        mock_gettempdir.return_value = str(tmp_path)
+        owned_dir = tmp_path / "aws-exe-sys-worker" / "run-stale"
+        owned_dir.mkdir(parents=True)
+        mock_rmtree.side_effect = OSError("cleanup denied")
+
+        with pytest.raises(OSError, match="cleanup denied"):
+            cleanup_stale_workdirs()
+
+    @patch("aws_exe_sys.worker.run.write_result")
+    @patch("aws_exe_sys.worker.run.run_commands")
+    @patch("boto3.client")
+    @patch("aws_exe_sys.worker.run.tempfile.gettempdir")
+    def test_second_run_removes_first_run_workspace(
+        self,
+        mock_gettempdir,
+        mock_boto_client,
+        mock_run_commands,
+        mock_write_result,
+        tmp_path,
+    ):
+        mock_gettempdir.return_value = str(tmp_path)
+        scratch_root = tmp_path / "aws-exe-sys-worker"
+        scratch_root.mkdir()
+        foreign_file = scratch_root / "foreign-file"
+        foreign_file.write_text("keep")
+        workdirs: list[Path] = []
+
+        def download_zip(bucket: str, key: str, destination: str) -> None:
+            assert bucket == "bucket"
+            assert key == "exec.zip"
+            with zipfile.ZipFile(destination, "w") as archive:
+                archive.writestr("package.txt", "package")
+
+        def execute_commands(
+            commands: list[str],
+            *,
+            env: dict[str, str],
+            work_dir: str,
+        ) -> list[StepResult]:
+            del commands, env
+            current_workdir = Path(work_dir)
+            if workdirs:
+                assert not workdirs[0].exists()
+                assert not (current_workdir / "first-run-only").exists()
+            else:
+                (current_workdir / "first-run-only").write_text("stale")
+            workdirs.append(current_workdir)
+            return [
+                StepResult(
+                    step_name="step-0",
+                    status="succeeded",
+                    exit_code=0,
+                    duration_seconds=0.1,
+                    output="ok",
+                ),
+            ]
+
+        mock_boto_client.return_value.download_file.side_effect = download_zip
+        mock_run_commands.side_effect = execute_commands
+
+        for trigger_id in ("first", "second"):
+            status = run(
+                trigger_id=trigger_id,
+                s3_package_uri="s3://bucket/exec.zip",
+                sops_type=None,
+                sops_path=None,
+                commands_b64=_encode_commands(["echo ok"]),
+                done_endpoint=DONE_ENDPOINT,
+                execution_target="lambda",
             )
             assert status == "succeeded"
-            assert "first" in log
-            assert "second" in log
 
-    def test_stops_on_first_failure(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            status, log = _execute_commands(
-                ["echo before", "exit 1", "echo after"],
-                tmpdir,
-            )
-            assert status == "failed"
-            assert "before" in log
-            assert "after" not in log
+        assert len(workdirs) == 2
+        assert not workdirs[0].exists()
+        assert workdirs[1].is_dir()
+        assert foreign_file.read_text() == "keep"
+        assert mock_write_result.call_count == 2
 
-    def test_timeout(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            status, log = _execute_commands(
-                ["sleep 10"],
-                tmpdir,
-                timeout=1,
-            )
-            assert status == "timed_out"
-            assert "timed out" in log.lower()
+    @patch("aws_exe_sys.worker.run.write_result")
+    @patch("aws_exe_sys.worker.run.fetch_code_s3")
+    @patch("aws_exe_sys.worker.run.cleanup_stale_workdirs")
+    def test_run_reports_cleanup_failure(
+        self,
+        mock_cleanup,
+        mock_fetch,
+        mock_write,
+    ):
+        mock_cleanup.side_effect = OSError("cleanup denied")
 
-    def test_captures_stderr(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            status, log = _execute_commands(
-                ["echo error_msg >&2"],
-                tmpdir,
-            )
-            # stderr is merged with stdout via STDOUT redirect
-            assert "error_msg" in log
-
-    def test_custom_env_passed_to_subprocess(self):
-        """Verify that a custom env dict is used instead of os.environ."""
-        custom_env = os.environ.copy()
-        custom_env["TEST_WORKER_CUSTOM"] = "from_custom_env"
-        with tempfile.TemporaryDirectory() as tmpdir:
-            status, log = _execute_commands(
-                ["echo $TEST_WORKER_CUSTOM"],
-                tmpdir,
-                env=custom_env,
-            )
-            assert status == "succeeded"
-            assert "from_custom_env" in log
-
-    def test_default_env_when_none(self):
-        """When env=None, falls back to os.environ.copy()."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            status, log = _execute_commands(["echo hello"], tmpdir, env=None)
-            assert status == "succeeded"
-            assert "hello" in log
-
-
-class TestSetupEventsDir:
-    def test_creates_directory(self):
-        trace_id = "test-trace-123"
-        events_dir = _setup_events_dir(trace_id)
-        assert os.path.isdir(events_dir)
-        assert events_dir == f"/tmp/share/{trace_id}/events"
-
-    def test_does_not_set_env_var(self):
-        """_setup_events_dir no longer mutates os.environ."""
-        with patch.dict(os.environ, {}, clear=False):
-            # Remove it if it exists
-            os.environ.pop("AWS_EXE_SYS_EVENTS_DIR", None)
-            trace_id = "test-trace-no-env"
-            _setup_events_dir(trace_id)
-            assert "AWS_EXE_SYS_EVENTS_DIR" not in os.environ
-
-    def test_idempotent(self):
-        trace_id = "test-trace-789"
-        dir1 = _setup_events_dir(trace_id)
-        dir2 = _setup_events_dir(trace_id)
-        assert dir1 == dir2
-        assert os.path.isdir(dir1)
-
-
-class TestCollectAndWriteEvents:
-    @patch("aws_exe_sys.worker.run.dynamodb.put_event")
-    def test_writes_events_to_dynamodb(self, mock_put_event):
-        with tempfile.TemporaryDirectory() as events_dir:
-            # Write two event files
-            with open(os.path.join(events_dir, "tf_plan.json"), "w") as f:
-                json.dump({
-                    "event_type": "tf_plan",
-                    "status": "succeeded",
-                    "message": "Plan: 3 to add",
-                }, f)
-            with open(os.path.join(events_dir, "tf_apply.json"), "w") as f:
-                json.dump({
-                    "event_type": "tf_apply",
-                    "status": "succeeded",
-                }, f)
-
-            count = _collect_and_write_events(
-                events_dir, "trace-1", "my-order", "flow-1", "run-1",
-            )
-
-            assert count == 2
-            assert mock_put_event.call_count == 2
-
-            # Verify first call (tf_apply.json comes first alphabetically)
-            calls = mock_put_event.call_args_list
-            # Files are sorted, so tf_apply before tf_plan
-            call_args_0 = calls[0]
-            assert call_args_0[1]["trace_id"] == "trace-1"
-            assert call_args_0[1]["order_name"] == "my-order"
-            assert call_args_0[1]["event_type"] == "tf_apply"
-            assert call_args_0[1]["status"] == "succeeded"
-            assert call_args_0[1]["extra_fields"]["flow_id"] == "flow-1"
-            assert call_args_0[1]["extra_fields"]["run_id"] == "run-1"
-
-            call_args_1 = calls[1]
-            assert call_args_1[1]["event_type"] == "tf_plan"
-            assert call_args_1[1]["data"]["message"] == "Plan: 3 to add"
-
-    @patch("aws_exe_sys.worker.run.dynamodb.put_event")
-    def test_empty_dir_no_calls(self, mock_put_event):
-        with tempfile.TemporaryDirectory() as events_dir:
-            count = _collect_and_write_events(
-                events_dir, "trace-1", "my-order",
-            )
-            assert count == 0
-            mock_put_event.assert_not_called()
-
-    @patch("aws_exe_sys.worker.run.dynamodb.put_event")
-    def test_nonexistent_dir_no_calls(self, mock_put_event):
-        count = _collect_and_write_events(
-            "/nonexistent/path", "trace-1", "my-order",
+        status = run(
+            trigger_id="cleanup-failed",
+            s3_package_uri="s3://bucket/exec.zip",
+            sops_type=None,
+            sops_path=None,
+            commands_b64=_encode_commands(["echo never"]),
+            done_endpoint=DONE_ENDPOINT,
+            execution_target="lambda",
         )
-        assert count == 0
-        mock_put_event.assert_not_called()
 
-    @patch("aws_exe_sys.worker.run.dynamodb.put_event")
-    def test_malformed_json_skipped(self, mock_put_event):
-        with tempfile.TemporaryDirectory() as events_dir:
-            # Write invalid JSON
-            with open(os.path.join(events_dir, "bad.json"), "w") as f:
-                f.write("not valid json{{{")
-            # Write valid JSON
-            with open(os.path.join(events_dir, "good.json"), "w") as f:
-                json.dump({"event_type": "ok", "status": "info"}, f)
-
-            count = _collect_and_write_events(
-                events_dir, "trace-1", "my-order",
-            )
-            assert count == 1
-            mock_put_event.assert_called_once()
-
-    @patch("aws_exe_sys.worker.run.dynamodb.put_event")
-    def test_non_dict_json_skipped(self, mock_put_event):
-        with tempfile.TemporaryDirectory() as events_dir:
-            with open(os.path.join(events_dir, "array.json"), "w") as f:
-                json.dump([1, 2, 3], f)
-
-            count = _collect_and_write_events(
-                events_dir, "trace-1", "my-order",
-            )
-            assert count == 0
-            mock_put_event.assert_not_called()
-
-    @patch("aws_exe_sys.worker.run.dynamodb.put_event")
-    def test_missing_fields_uses_fallbacks(self, mock_put_event):
-        with tempfile.TemporaryDirectory() as events_dir:
-            # JSON with no event_type or status — uses filename stem and "info"
-            with open(os.path.join(events_dir, "custom_check.json"), "w") as f:
-                json.dump({"message": "all good"}, f)
-
-            count = _collect_and_write_events(
-                events_dir, "trace-1", "my-order",
-            )
-            assert count == 1
-            call_kwargs = mock_put_event.call_args[1]
-            assert call_kwargs["event_type"] == "custom_check"
-            assert call_kwargs["status"] == "info"
-            assert call_kwargs["data"]["message"] == "all good"
-
-    @patch("aws_exe_sys.worker.run.dynamodb.put_event")
-    def test_dynamodb_error_does_not_crash(self, mock_put_event):
-        mock_put_event.side_effect = Exception("DynamoDB unavailable")
-        with tempfile.TemporaryDirectory() as events_dir:
-            with open(os.path.join(events_dir, "event.json"), "w") as f:
-                json.dump({"event_type": "test", "status": "ok"}, f)
-
-            count = _collect_and_write_events(
-                events_dir, "trace-1", "my-order",
-            )
-            assert count == 0  # Failed to write
+        assert status == "failed"
+        mock_fetch.assert_not_called()
+        mock_write.assert_called_once()
+        result_arg = mock_write.call_args.args[1]
+        assert result_arg.status == "failed"
+        assert result_arg.error == "cleanup denied"
 
 
-class TestRun:
-    @patch("aws_exe_sys.worker.run._collect_and_write_events")
-    @patch("aws_exe_sys.worker.run.send_callback")
-    @patch("aws_exe_sys.worker.run._decrypt_and_load_env")
+class TestRunHappyPath:
+    """Happy path: download succeeds, SOPS succeeds, commands succeed."""
+
+    @patch("aws_exe_sys.worker.run.write_result")
+    @patch("aws_exe_sys.worker.run.run_commands")
+    @patch("aws_exe_sys.worker.run.handle_sops")
     @patch("aws_exe_sys.worker.run.fetch_code_s3")
-    def test_successful_run(self, mock_fetch, mock_decrypt, mock_callback, mock_collect):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Create cmds.json
-            with open(os.path.join(tmpdir, "cmds.json"), "w") as f:
-                json.dump(["echo hello"], f)
-
-            mock_fetch.return_value = tmpdir
-            mock_decrypt.return_value = {
-                "CALLBACK_URL": "https://cb.url",
-                "TRACE_ID": "tr-1",
-                "ORDER_ID": "order-1",
-                "FLOW_ID": "flow-1",
-                "RUN_ID": "run-1",
-            }
-
-            status = run("s3://bucket/exec.zip")
-
-            assert status == "succeeded"
-            mock_callback.assert_called_once()
-            call_args = mock_callback.call_args[0]
-            assert call_args[0] == "https://cb.url"
-            assert call_args[1] == "succeeded"
-
-            # Verify events collection was called
-            mock_collect.assert_called_once()
-            collect_args = mock_collect.call_args[0]
-            assert collect_args[1] == "tr-1"   # trace_id
-            assert collect_args[2] == "order-1" # order_name
-            assert collect_args[3] == "flow-1"  # flow_id
-            assert collect_args[4] == "run-1"   # run_id
-
-    @patch("aws_exe_sys.worker.run._collect_and_write_events")
-    @patch("aws_exe_sys.worker.run.send_callback")
-    @patch("aws_exe_sys.worker.run._decrypt_and_load_env")
-    @patch("aws_exe_sys.worker.run.fetch_code_s3")
-    def test_failed_run(self, mock_fetch, mock_decrypt, mock_callback, mock_collect):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with open(os.path.join(tmpdir, "cmds.json"), "w") as f:
-                json.dump(["exit 1"], f)
-
-            mock_fetch.return_value = tmpdir
-            mock_decrypt.return_value = {
-                "CALLBACK_URL": "https://cb.url",
-                "TRACE_ID": "tr-1",
-                "ORDER_ID": "order-1",
-            }
-
-            status = run("s3://bucket/exec.zip")
-
-            assert status == "failed"
-            mock_callback.assert_called_once()
-            assert mock_callback.call_args[0][1] == "failed"
-            # Events still collected even on failure
-            mock_collect.assert_called_once()
-
-    @patch("aws_exe_sys.worker.run.send_callback")
-    @patch("aws_exe_sys.worker.run._decrypt_and_load_env")
-    @patch("aws_exe_sys.worker.run.fetch_code_s3")
-    def test_no_commands(self, mock_fetch, mock_decrypt, mock_callback):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            mock_fetch.return_value = tmpdir
-            mock_decrypt.return_value = {"CALLBACK_URL": "https://cb.url"}
-
-            status = run("s3://bucket/exec.zip")
-
-            assert status == "failed"
-
-    @patch("aws_exe_sys.worker.run._collect_and_write_events")
-    @patch("aws_exe_sys.worker.run.send_callback")
-    @patch("aws_exe_sys.worker.run._decrypt_and_load_env")
-    @patch("aws_exe_sys.worker.run.fetch_code_s3")
-    def test_cmds_from_env(self, mock_fetch, mock_decrypt, mock_callback, mock_collect):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            mock_fetch.return_value = tmpdir
-            mock_decrypt.return_value = {
-                "CALLBACK_URL": "https://cb.url",
-                "CMDS": json.dumps(["echo from_env"]),
-                "TRACE_ID": "tr-1",
-                "ORDER_ID": "order-1",
-            }
-
-            status = run("s3://bucket/exec.zip")
-
-            assert status == "succeeded"
-
-    @patch("aws_exe_sys.worker.run._collect_and_write_events")
-    @patch("aws_exe_sys.worker.run.send_callback")
-    @patch("aws_exe_sys.worker.run._decrypt_and_load_env")
-    @patch("aws_exe_sys.worker.run.fetch_code_s3")
-    def test_no_trace_id_skips_events(self, mock_fetch, mock_decrypt, mock_callback, mock_collect):
-        """Without TRACE_ID, events dir is not set up and collection is skipped."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with open(os.path.join(tmpdir, "cmds.json"), "w") as f:
-                json.dump(["echo hello"], f)
-
-            mock_fetch.return_value = tmpdir
-            mock_decrypt.return_value = {"CALLBACK_URL": "https://cb.url"}
-
-            status = run("s3://bucket/exec.zip")
-
-            assert status == "succeeded"
-            mock_collect.assert_not_called()
-
-    @patch("aws_exe_sys.worker.run._collect_and_write_events")
-    @patch("aws_exe_sys.worker.run.send_callback")
-    @patch("aws_exe_sys.worker.run._decrypt_and_load_env")
-    @patch("aws_exe_sys.worker.run.fetch_code_s3")
-    def test_sops_key_passed_to_decrypt(self, mock_fetch, mock_decrypt, mock_callback, mock_collect):
-        """Verify sops_key_ssm_path is forwarded to _decrypt_and_load_env."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with open(os.path.join(tmpdir, "cmds.json"), "w") as f:
-                json.dump(["echo hello"], f)
-
-            mock_fetch.return_value = tmpdir
-            mock_decrypt.return_value = {"CALLBACK_URL": "https://cb.url"}
-
-            run("s3://bucket/exec.zip", sops_key_ssm_path="/my/ssm/path")
-
-            mock_decrypt.assert_called_once_with(tmpdir, sops_key_ssm_path="/my/ssm/path")
-
-    @patch("aws_exe_sys.worker.run.send_callback")
-    @patch("aws_exe_sys.worker.run._decrypt_and_load_env")
-    @patch("aws_exe_sys.worker.run.fetch_code_s3")
-    def test_run_threads_run_id_to_callback_on_sops_expired(
-        self, mock_fetch, mock_decrypt, mock_callback,
+    def test_full_pipeline_succeeded(
+        self,
+        mock_fetch,
+        mock_sops,
+        mock_run_cmds,
+        mock_write,
     ):
-        """On SopsKeyExpired, env_vars is empty — run_id/order_num MUST come
-        from run()'s explicit parameters and be threaded through to
-        send_callback's DynamoDB fallback.
-        """
-        with tempfile.TemporaryDirectory() as tmpdir:
-            mock_fetch.return_value = tmpdir
-            mock_decrypt.side_effect = SopsKeyExpired("key gone")
+        mock_fetch.return_value = "/tmp/work"
+        mock_sops.return_value = {"SECRET_KEY": "val"}
+        mock_run_cmds.return_value = [
+            StepResult(step_name="step-0", status="succeeded", exit_code=0, duration_seconds=0.1, output="ok"),
+        ]
 
-            status = run(
-                "s3://bucket/exec.zip",
-                sops_key_ssm_path="/sops/r1/0001",
-                callback_url="https://cb.url",
-                run_id="r1",
-                order_num="0001",
-            )
+        status = run(
+            trigger_id="t-1",
+            s3_package_uri="s3://bucket/exec.zip",
+            sops_type="ssm",
+            sops_path="/sops/key/path",
+            commands_b64=_encode_commands(["echo hello"]),
+            done_endpoint=DONE_ENDPOINT,
+            execution_target="lambda",
+        )
 
-            assert status == "failed"
-            mock_callback.assert_called_once()
-            kwargs = mock_callback.call_args.kwargs
-            assert kwargs["run_id"] == "r1"
-            assert kwargs["order_num"] == "0001"
+        assert status == "succeeded"
+        mock_fetch.assert_called_once_with("s3://bucket/exec.zip")
+        mock_sops.assert_called_once_with("/tmp/work", sops_type="ssm", sops_path="/sops/key/path")
+        mock_run_cmds.assert_called_once()
+        mock_write.assert_called_once()
+        result_arg = mock_write.call_args[0][1]
+        assert isinstance(result_arg, ExecutionResult)
+        assert result_arg.trigger_id == "t-1"
+        assert result_arg.status == "succeeded"
+        assert len(result_arg.steps) == 1
+        assert result_arg.error is None
 
-    @patch("aws_exe_sys.worker.run.send_callback")
-    @patch("aws_exe_sys.worker.run._decrypt_and_load_env")
+    @patch("aws_exe_sys.worker.run.write_result")
+    @patch("aws_exe_sys.worker.run.run_commands")
     @patch("aws_exe_sys.worker.run.fetch_code_s3")
-    def test_callback_failed_on_sops_key_expired(
-        self, mock_fetch, mock_decrypt, mock_callback
+    def test_no_sops_when_sops_type_is_none(
+        self,
+        mock_fetch,
+        mock_run_cmds,
+        mock_write,
     ):
-        """When the SOPS key parameter has expired/been deleted from SSM,
-        the worker must callback with status=failed and error=sops_key_expired
-        instead of crashing with a raw boto3 error. The orchestrator relies
-        on the callback to finalize the order; without it, the order hangs
-        until the step-function watchdog fires (~5 min later).
+        mock_fetch.return_value = "/tmp/work"
+        mock_run_cmds.return_value = [
+            StepResult(step_name="step-0", status="succeeded", exit_code=0, duration_seconds=0.1, output="ok"),
+        ]
 
-        The callback_url is passed as a plaintext argument (not inside the
-        SOPS bundle) precisely so it remains reachable when the bundle
-        cannot be decrypted.
-        """
-        fallback_url = "https://callback.example.internal/run-x/000"
-        with tempfile.TemporaryDirectory() as tmpdir:
-            mock_fetch.return_value = tmpdir
-            mock_decrypt.side_effect = SopsKeyExpired(
-                "SOPS key /aws-exe-sys/sops-keys/run-x/000 is missing or expired"
-            )
+        status = run(
+            trigger_id="t-2",
+            s3_package_uri="s3://bucket/exec.zip",
+            sops_type=None,
+            sops_path=None,
+            commands_b64=_encode_commands(["echo hi"]),
+            done_endpoint=DONE_ENDPOINT,
+            execution_target="codebuild",
+        )
 
-            status = run(
-                "s3://bucket/exec.zip",
-                sops_key_ssm_path="/aws-exe-sys/sops-keys/run-x/000",
-                callback_url=fallback_url,
-            )
+        assert status == "succeeded"
+        result_arg = mock_write.call_args[0][1]
+        assert result_arg.status == "succeeded"
 
-            assert status == "failed"
-            mock_callback.assert_called_once()
-            args, kwargs = mock_callback.call_args
-            assert args[0] == fallback_url
-            assert args[1] == "failed"
-            assert "sops_key_expired" in args[2].lower()
-
-    @patch("aws_exe_sys.worker.run._collect_and_write_events")
-    @patch("aws_exe_sys.worker.run.send_callback")
-    @patch("aws_exe_sys.worker.run._decrypt_and_load_env")
+    @patch("aws_exe_sys.worker.run.write_result")
+    @patch("aws_exe_sys.worker.run.run_commands")
+    @patch("aws_exe_sys.worker.run.handle_sops")
     @patch("aws_exe_sys.worker.run.fetch_code_s3")
-    def test_no_environ_mutation(self, mock_fetch, mock_decrypt, mock_callback, mock_collect):
-        """Verify run() does not mutate os.environ."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with open(os.path.join(tmpdir, "cmds.json"), "w") as f:
-                json.dump(["echo hello"], f)
+    def test_sops_env_vars_passed_to_commands(
+        self,
+        mock_fetch,
+        mock_sops,
+        mock_run_cmds,
+        mock_write,
+    ):
+        """SOPS decrypted env vars should be merged into the subprocess env."""
+        mock_fetch.return_value = "/tmp/work"
+        mock_sops.return_value = {"MY_SECRET": "s3cr3t"}
+        mock_run_cmds.return_value = [
+            StepResult(step_name="step-0", status="succeeded", exit_code=0, duration_seconds=0.1, output=""),
+        ]
 
-            mock_fetch.return_value = tmpdir
-            mock_decrypt.return_value = {
-                "CALLBACK_URL": "https://cb.url",
-                "TRACE_ID": "tr-1",
-                "ORDER_ID": "order-1",
-                "INJECTED_VAR": "should_not_leak",
-            }
+        run(
+            trigger_id="t-env",
+            s3_package_uri="s3://bucket/exec.zip",
+            sops_type="kms",
+            sops_path=None,
+            commands_b64=_encode_commands(["echo test"]),
+            done_endpoint=DONE_ENDPOINT,
+            execution_target="lambda",
+        )
 
-            env_before = os.environ.copy()
-            run("s3://bucket/exec.zip")
-            env_after = os.environ.copy()
+        # Check that env dict passed to run_commands includes the SOPS var
+        call_kwargs = mock_run_cmds.call_args
+        env_passed = call_kwargs[1]["env"] if "env" in call_kwargs[1] else call_kwargs[0][1]
+        assert env_passed["MY_SECRET"] == "s3cr3t"
 
-            # os.environ should not have INJECTED_VAR
-            assert "INJECTED_VAR" not in env_after
-            # os.environ should not have AWS_EXE_SYS_EVENTS_DIR set by run()
-            assert env_before.get("AWS_EXE_SYS_EVENTS_DIR") == env_after.get("AWS_EXE_SYS_EVENTS_DIR")
+
+class TestRunS3DownloadFail:
+    """S3 download fail -> failed result written to done_endpoint."""
+
+    @patch("aws_exe_sys.worker.run.write_result")
+    @patch("aws_exe_sys.worker.run.fetch_code_s3")
+    def test_s3_download_failure_writes_failed_result(
+        self,
+        mock_fetch,
+        mock_write,
+    ):
+        mock_fetch.side_effect = Exception("S3 download failed: NoSuchKey")
+
+        status = run(
+            trigger_id="t-s3fail",
+            s3_package_uri="s3://bucket/missing.zip",
+            sops_type=None,
+            sops_path=None,
+            commands_b64=_encode_commands(["echo never"]),
+            done_endpoint=DONE_ENDPOINT,
+            execution_target="lambda",
+        )
+
+        assert status == "failed"
+        mock_write.assert_called_once()
+        result_arg = mock_write.call_args[0][1]
+        assert result_arg.trigger_id == "t-s3fail"
+        assert result_arg.status == "failed"
+        assert "S3 download failed" in result_arg.error
+        assert result_arg.steps == []
+
+
+class TestRunSopsFail:
+    """SOPS fail -> failed result written to done_endpoint."""
+
+    @patch("aws_exe_sys.worker.run.write_result")
+    @patch("aws_exe_sys.worker.run.handle_sops")
+    @patch("aws_exe_sys.worker.run.fetch_code_s3")
+    def test_sops_key_expired_writes_failed_result(
+        self,
+        mock_fetch,
+        mock_sops,
+        mock_write,
+    ):
+        mock_fetch.return_value = "/tmp/work"
+        mock_sops.side_effect = SopsKeyExpired("key /sops/key is missing or expired")
+
+        status = run(
+            trigger_id="t-sops",
+            s3_package_uri="s3://bucket/exec.zip",
+            sops_type="ssm",
+            sops_path="/sops/key",
+            commands_b64=_encode_commands(["echo never"]),
+            done_endpoint=DONE_ENDPOINT,
+            execution_target="lambda",
+        )
+
+        assert status == "failed"
+        mock_write.assert_called_once()
+        result_arg = mock_write.call_args[0][1]
+        assert result_arg.status == "failed"
+        assert "sops_key_expired" in result_arg.error
+        assert result_arg.steps == []
+
+    @patch("aws_exe_sys.worker.run.write_result")
+    @patch("aws_exe_sys.worker.run.handle_sops")
+    @patch("aws_exe_sys.worker.run.fetch_code_s3")
+    def test_sops_generic_error_writes_failed_result(
+        self,
+        mock_fetch,
+        mock_sops,
+        mock_write,
+    ):
+        mock_fetch.return_value = "/tmp/work"
+        mock_sops.side_effect = RuntimeError("sops binary not found")
+
+        status = run(
+            trigger_id="t-sops-err",
+            s3_package_uri="s3://bucket/exec.zip",
+            sops_type="ssm",
+            sops_path="/sops/key",
+            commands_b64=_encode_commands(["echo never"]),
+            done_endpoint=DONE_ENDPOINT,
+            execution_target="lambda",
+        )
+
+        assert status == "failed"
+        result_arg = mock_write.call_args[0][1]
+        assert result_arg.status == "failed"
+        assert "sops binary not found" in result_arg.error
+
+
+class TestRunCommandFail:
+    """Command fail -> failed result with partial steps written."""
+
+    @patch("aws_exe_sys.worker.run.write_result")
+    @patch("aws_exe_sys.worker.run.run_commands")
+    @patch("aws_exe_sys.worker.run.fetch_code_s3")
+    def test_command_failure_has_partial_steps(
+        self,
+        mock_fetch,
+        mock_run_cmds,
+        mock_write,
+    ):
+        mock_fetch.return_value = "/tmp/work"
+        mock_run_cmds.return_value = [
+            StepResult(step_name="step-0", status="succeeded", exit_code=0, duration_seconds=0.1, output="ok"),
+            StepResult(step_name="step-1", status="failed", exit_code=1, duration_seconds=0.2, output="error"),
+        ]
+
+        status = run(
+            trigger_id="t-cmdfail",
+            s3_package_uri="s3://bucket/exec.zip",
+            sops_type=None,
+            sops_path=None,
+            commands_b64=_encode_commands(["echo ok", "exit 1", "echo unreachable"]),
+            done_endpoint=DONE_ENDPOINT,
+            execution_target="codebuild",
+        )
+
+        assert status == "failed"
+        result_arg = mock_write.call_args[0][1]
+        assert result_arg.status == "failed"
+        assert len(result_arg.steps) == 2
+        assert result_arg.steps[0].status == "succeeded"
+        assert result_arg.steps[1].status == "failed"
+        assert result_arg.error is None  # Error is in steps, not top-level
+
+
+class TestRunAlwaysWritesResult:
+    """Key invariant: result is ALWAYS written even on failure."""
+
+    @patch("aws_exe_sys.worker.run.write_result")
+    @patch("aws_exe_sys.worker.run.fetch_code_s3")
+    def test_write_result_called_on_exception(
+        self,
+        mock_fetch,
+        mock_write,
+    ):
+        mock_fetch.side_effect = Exception("boom")
+
+        run(
+            trigger_id="t-boom",
+            s3_package_uri="s3://bucket/exec.zip",
+            sops_type=None,
+            sops_path=None,
+            commands_b64=_encode_commands(["echo"]),
+            done_endpoint=DONE_ENDPOINT,
+            execution_target="lambda",
+        )
+
+        mock_write.assert_called_once()
+        assert mock_write.call_args[0][0] == DONE_ENDPOINT
+
+    @patch("aws_exe_sys.worker.run.write_result")
+    @patch("aws_exe_sys.worker.run.run_commands")
+    @patch("aws_exe_sys.worker.run.fetch_code_s3")
+    def test_write_result_called_on_success(
+        self,
+        mock_fetch,
+        mock_run_cmds,
+        mock_write,
+    ):
+        mock_fetch.return_value = "/tmp/work"
+        mock_run_cmds.return_value = [
+            StepResult(step_name="step-0", status="succeeded", exit_code=0, duration_seconds=0.1, output=""),
+        ]
+
+        run(
+            trigger_id="t-ok",
+            s3_package_uri="s3://bucket/exec.zip",
+            sops_type=None,
+            sops_path=None,
+            commands_b64=_encode_commands(["echo"]),
+            done_endpoint=DONE_ENDPOINT,
+            execution_target="lambda",
+        )
+
+        mock_write.assert_called_once()
+
+    @patch("aws_exe_sys.worker.run.write_result")
+    @patch("aws_exe_sys.worker.run.handle_sops")
+    @patch("aws_exe_sys.worker.run.fetch_code_s3")
+    def test_write_result_called_on_sops_expired(
+        self,
+        mock_fetch,
+        mock_sops,
+        mock_write,
+    ):
+        mock_fetch.return_value = "/tmp/work"
+        mock_sops.side_effect = SopsKeyExpired("gone")
+
+        run(
+            trigger_id="t-sops-gone",
+            s3_package_uri="s3://bucket/exec.zip",
+            sops_type="ssm",
+            sops_path="/key",
+            commands_b64=_encode_commands(["echo"]),
+            done_endpoint=DONE_ENDPOINT,
+            execution_target="lambda",
+        )
+
+        mock_write.assert_called_once()
+
+    @patch("aws_exe_sys.worker.run.write_result")
+    @patch("aws_exe_sys.worker.run.fetch_code_s3")
+    def test_write_result_failure_is_raised(
+        self,
+        mock_fetch,
+        mock_write,
+    ):
+        """A worker must not report completion when the done marker was not written."""
+        mock_fetch.side_effect = Exception("download failed")
+        mock_write.side_effect = OSError("S3 write failed")
+
+        with pytest.raises(OSError, match="S3 write failed"):
+            run(
+                trigger_id="t-write-fail",
+                s3_package_uri="s3://bucket/exec.zip",
+                sops_type=None,
+                sops_path=None,
+                commands_b64=_encode_commands(["echo"]),
+                done_endpoint=DONE_ENDPOINT,
+                execution_target="lambda",
+            )
+
+
+class TestRunNoEnvironMutation:
+    """Verify run() does not mutate os.environ."""
+
+    @patch("aws_exe_sys.worker.run.write_result")
+    @patch("aws_exe_sys.worker.run.run_commands")
+    @patch("aws_exe_sys.worker.run.handle_sops")
+    @patch("aws_exe_sys.worker.run.fetch_code_s3")
+    def test_no_environ_mutation(
+        self,
+        mock_fetch,
+        mock_sops,
+        mock_run_cmds,
+        mock_write,
+    ):
+        mock_fetch.return_value = "/tmp/work"
+        mock_sops.return_value = {"INJECTED_VAR": "should_not_leak"}
+        mock_run_cmds.return_value = [
+            StepResult(step_name="step-0", status="succeeded", exit_code=0, duration_seconds=0.1, output=""),
+        ]
+
+        env_before = os.environ.copy()
+        run(
+            trigger_id="t-env",
+            s3_package_uri="s3://bucket/exec.zip",
+            sops_type="kms",
+            sops_path=None,
+            commands_b64=_encode_commands(["echo"]),
+            done_endpoint=DONE_ENDPOINT,
+            execution_target="lambda",
+        )
+        env_after = os.environ.copy()
+
+        assert "INJECTED_VAR" not in env_after
+        assert env_before == env_after

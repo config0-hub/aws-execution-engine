@@ -10,20 +10,6 @@ data "aws_iam_policy_document" "lambda_assume" {
   }
 }
 
-# --- Bootstrap seam: conditional ssm:GetParameter on engine code path ---
-# Emitted only when var.engine_code_source.kind == "ssm_url"; when "inline"
-# this list is empty and leaves every Lambda role's policy byte-identical
-# to the baseline (tofu plan zero-diff).
-locals {
-  engine_code_read_statements = var.engine_code_source.kind == "ssm_url" ? [
-    {
-      Effect   = "Allow"
-      Action   = ["ssm:GetParameter"]
-      Resource = "arn:aws:ssm:${local.region}:${local.account_id}:parameter${var.engine_code_source.value}*"
-    }
-  ] : []
-}
-
 # --- CloudWatch Logs policy (attached to all Lambda roles) ---
 
 data "aws_iam_policy_document" "lambda_logs" {
@@ -52,95 +38,19 @@ resource "aws_iam_role_policy" "init_job" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = concat([
+    Statement = [
       {
         Effect = "Allow"
-        Action = ["dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:Query"]
-        Resource = [
-          aws_dynamodb_table.orders.arn,
-          "${aws_dynamodb_table.orders.arn}/index/*",
-          aws_dynamodb_table.order_events.arn,
-          "${aws_dynamodb_table.order_events.arn}/index/*",
-        ]
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["s3:PutObject", "s3:GetObject"]
-        Resource = "${aws_s3_bucket.internal.arn}/*"
+        Action = ["s3:GetObject"]
+        Resource = concat(
+          ["${aws_s3_bucket.internal.arn}/*"],
+          [for arn in var.additional_package_bucket_arns : "${arn}/*"],
+        )
       },
       {
         Effect   = "Allow"
         Action   = ["ssm:GetParameter"]
-        Resource = "arn:aws:ssm:${local.region}:${local.account_id}:parameter/*"
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["ssm:PutParameter"]
         Resource = "arn:aws:ssm:${local.region}:${local.account_id}:parameter/exe-sys/sops-keys/*"
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["secretsmanager:GetSecretValue"]
-        Resource = "arn:aws:secretsmanager:${local.region}:${local.account_id}:secret:*"
-      },
-    ], local.engine_code_read_statements)
-  })
-}
-
-resource "aws_iam_role_policy" "init_job_logs" {
-  name   = "logs"
-  role   = aws_iam_role.init_job.id
-  policy = data.aws_iam_policy_document.lambda_logs.json
-}
-
-# ============================================================
-# orchestrator
-# ============================================================
-
-resource "aws_iam_role" "orchestrator" {
-  name               = "${local.prefix}-orchestrator"
-  assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
-}
-
-resource "aws_iam_role_policy" "orchestrator" {
-  name = "${local.prefix}-orchestrator"
-  role = aws_iam_role.orchestrator.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = concat([
-      {
-        Effect = "Allow"
-        Action = [
-          "dynamodb:PutItem",
-          "dynamodb:GetItem",
-          "dynamodb:Query",
-          "dynamodb:UpdateItem",
-          "dynamodb:DeleteItem",
-        ]
-        Resource = [
-          aws_dynamodb_table.orders.arn,
-          "${aws_dynamodb_table.orders.arn}/index/*",
-          aws_dynamodb_table.order_events.arn,
-          "${aws_dynamodb_table.order_events.arn}/index/*",
-          aws_dynamodb_table.orchestrator_locks.arn,
-        ]
-      },
-      {
-        Effect = "Allow"
-        Action = ["s3:GetObject", "s3:PutObject"]
-        Resource = [
-          "${aws_s3_bucket.internal.arn}/*",
-          "${aws_s3_bucket.done.arn}/*",
-        ]
-      },
-      {
-        Effect = "Allow"
-        Action = ["s3:ListBucket"]
-        Resource = [
-          aws_s3_bucket.internal.arn,
-          aws_s3_bucket.done.arn,
-        ]
       },
       {
         Effect   = "Allow"
@@ -152,62 +62,13 @@ resource "aws_iam_role_policy" "orchestrator" {
         Action   = ["codebuild:StartBuild"]
         Resource = aws_codebuild_project.worker.arn
       },
-      {
-        Effect   = "Allow"
-        Action   = ["states:StartExecution"]
-        Resource = aws_sfn_state_machine.watchdog.arn
-      },
-      {
-        Effect = "Allow"
-        Action = ["ssm:SendCommand"]
-        Resource = [
-          aws_ssm_document.run_commands.arn,
-          "arn:aws:ec2:${local.region}:${local.account_id}:instance/*",
-        ]
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["ssm:DeleteParameter"]
-        Resource = "arn:aws:ssm:${local.region}:${local.account_id}:parameter/exe-sys/sops-keys/*"
-      },
-    ], local.engine_code_read_statements)
+    ]
   })
 }
 
-resource "aws_iam_role_policy" "orchestrator_logs" {
+resource "aws_iam_role_policy" "init_job_logs" {
   name   = "logs"
-  role   = aws_iam_role.orchestrator.id
-  policy = data.aws_iam_policy_document.lambda_logs.json
-}
-
-# ============================================================
-# watchdog_check
-# ============================================================
-
-resource "aws_iam_role" "watchdog_check" {
-  name               = "${local.prefix}-watchdog-check"
-  assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
-}
-
-resource "aws_iam_role_policy" "watchdog_check" {
-  name = "${local.prefix}-watchdog-check"
-  role = aws_iam_role.watchdog_check.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = concat([
-      {
-        Effect   = "Allow"
-        Action   = ["s3:GetObject", "s3:PutObject"]
-        Resource = "${aws_s3_bucket.internal.arn}/tmp/callbacks/runs/*"
-      },
-    ], local.engine_code_read_statements)
-  })
-}
-
-resource "aws_iam_role_policy" "watchdog_check_logs" {
-  name   = "logs"
-  role   = aws_iam_role.watchdog_check.id
+  role   = aws_iam_role.init_job.id
   policy = data.aws_iam_policy_document.lambda_logs.json
 }
 
@@ -226,44 +87,39 @@ resource "aws_iam_role_policy" "worker" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = concat([
+    Statement = [
       {
-        Effect   = "Allow"
-        Action   = ["s3:GetObject"]
-        Resource = "${aws_s3_bucket.internal.arn}/tmp/exec/*"
+        Effect = "Allow"
+        Action = ["s3:GetObject"]
+        Resource = concat(
+          ["${aws_s3_bucket.internal.arn}/*"],
+          [for arn in var.additional_package_bucket_arns : "${arn}/*"],
+        )
       },
       {
-        Effect   = "Allow"
-        Action   = ["dynamodb:PutItem"]
-        Resource = aws_dynamodb_table.order_events.arn
-      },
-      # Callback fallback — when the presigned S3 PUT is unreachable,
-      # the worker writes the failure status directly to DynamoDB so
-      # the order is not stranded in RUNNING. Scoped to three
-      # attributes via ForAllValues:StringEquals (note the
-      # ForAllValues prefix — without it AWS only requires AT LEAST
-      # ONE referenced attribute to match the allowlist, which is
-      # useless for restriction). ReturnValues = NONE prevents the
-      # worker from reading existing item state via UpdateItem.
-      {
-        Effect   = "Allow"
-        Action   = ["dynamodb:UpdateItem"]
-        Resource = aws_dynamodb_table.orders.arn
-        Condition = {
-          "ForAllValues:StringEquals" = {
-            "dynamodb:Attributes" = ["status", "last_update", "error"]
-          }
-          StringEquals = {
-            "dynamodb:ReturnValues" = "NONE"
-          }
-        }
+        Effect = "Allow"
+        Action = ["s3:PutObject"]
+        Resource = concat(
+          ["${aws_s3_bucket.done.arn}/*"],
+          [for arn in var.additional_result_bucket_arns : "${arn}/*"],
+        )
       },
       {
         Effect   = "Allow"
         Action   = ["ssm:GetParameter"]
         Resource = "arn:aws:ssm:${local.region}:${local.account_id}:parameter/exe-sys/sops-keys/*"
       },
-    ], local.engine_code_read_statements)
+      {
+        Effect   = "Allow"
+        Action   = ["ssm:DeleteParameter"]
+        Resource = "arn:aws:ssm:${local.region}:${local.account_id}:parameter/exe-sys/sops-keys/*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt"]
+        Resource = var.kms_key_arn
+      },
+    ]
   })
 }
 
@@ -302,24 +158,25 @@ resource "aws_iam_role_policy" "codebuild" {
     Version = "2012-10-17"
     Statement = [
       {
-        Effect = "Allow"
-        Action = [
-          "ecr:GetAuthorizationToken",
-          "ecr:BatchCheckLayerAvailability",
-          "ecr:GetDownloadUrlForLayer",
-          "ecr:BatchGetImage",
-        ]
-        Resource = "*"
-      },
-      {
         Effect   = "Allow"
         Action   = ["s3:GetObject"]
-        Resource = "${aws_s3_bucket.internal.arn}/tmp/exec/*"
+        Resource = "arn:aws:s3:::${var.engine_zip_s3_bucket}/*"
       },
       {
-        Effect   = "Allow"
-        Action   = ["dynamodb:PutItem"]
-        Resource = aws_dynamodb_table.order_events.arn
+        Effect = "Allow"
+        Action = ["s3:GetObject"]
+        Resource = concat(
+          ["${aws_s3_bucket.internal.arn}/*"],
+          [for arn in var.additional_package_bucket_arns : "${arn}/*"],
+        )
+      },
+      {
+        Effect = "Allow"
+        Action = ["s3:PutObject"]
+        Resource = concat(
+          ["${aws_s3_bucket.done.arn}/*"],
+          [for arn in var.additional_result_bucket_arns : "${arn}/*"],
+        )
       },
       {
         Effect = "Allow"
@@ -335,56 +192,16 @@ resource "aws_iam_role_policy" "codebuild" {
         Action   = ["ssm:GetParameter"]
         Resource = "arn:aws:ssm:${local.region}:${local.account_id}:parameter/exe-sys/sops-keys/*"
       },
+      {
+        Effect   = "Allow"
+        Action   = ["ssm:DeleteParameter"]
+        Resource = "arn:aws:ssm:${local.region}:${local.account_id}:parameter/exe-sys/sops-keys/*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt"]
+        Resource = var.kms_key_arn
+      },
     ]
   })
-}
-
-# ============================================================
-# ssm_config
-# ============================================================
-
-resource "aws_iam_role" "ssm_config" {
-  name               = "${local.prefix}-ssm-config"
-  assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
-}
-
-resource "aws_iam_role_policy" "ssm_config" {
-  name = "${local.prefix}-ssm-config"
-  role = aws_iam_role.ssm_config.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = concat([
-      {
-        Effect = "Allow"
-        Action = ["dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:Query"]
-        Resource = [
-          aws_dynamodb_table.orders.arn,
-          aws_dynamodb_table.order_events.arn,
-          "${aws_dynamodb_table.order_events.arn}/index/*",
-        ]
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["s3:PutObject", "s3:GetObject"]
-        Resource = "${aws_s3_bucket.internal.arn}/*"
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["ssm:GetParameter"]
-        Resource = "arn:aws:ssm:${local.region}:${local.account_id}:parameter/*"
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["secretsmanager:GetSecretValue"]
-        Resource = "arn:aws:secretsmanager:${local.region}:${local.account_id}:secret:*"
-      },
-    ], local.engine_code_read_statements)
-  })
-}
-
-resource "aws_iam_role_policy" "ssm_config_logs" {
-  name   = "logs"
-  role   = aws_iam_role.ssm_config.id
-  policy = data.aws_iam_policy_document.lambda_logs.json
 }

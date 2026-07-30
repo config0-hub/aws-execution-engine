@@ -1,11 +1,12 @@
 """Generic Lambda handler infrastructure shared by init_job and ssm_config."""
 
+from collections.abc import Callable
 import json
 import logging
-from typing import Any, Callable, Dict, List
+from typing import Any
 
 
-def normalize_event(event: Dict[str, Any]) -> Dict[str, Any]:
+def normalize_event(event: dict[str, Any]) -> dict[str, Any]:
     """Extract the job payload from any supported invocation source.
 
     Returns a flat dict with at minimum 'job_parameters_b64'.
@@ -53,8 +54,8 @@ def apigw_response(status_code: int, body: dict) -> dict:
 
 def lambda_handler(
     process_fn: Callable,
-    event: Dict[str, Any],
-    extra_fields: List[str],
+    event: dict[str, Any],
+    extra_fields: list[str],
     logger_name: str = "lambda_handler",
 ) -> dict:
     """Generic Lambda entrypoint wrapper.

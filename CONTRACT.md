@@ -1,159 +1,65 @@
-# ENGINE CONTRACT -- aws-execution-engine
+# AWS execution engine wire contract
 
-Version: 1.0
-Status: Final (aligned with ACTION3.md)
+Version: 3.0
 
-## 1. Job Submission
+`aws_exe_sys` is a generic command runner. It accepts a prepared command payload,
+executes it on a selected target (`lambda` or `codebuild`), and writes one terminal result to S3.
 
-### Endpoint
-- Method: POST
-- Path: /init
-- Auth: AWS IAM SigV4 (execute-api:Invoke)
-- Content-Type: application/json
+Version 3.0 removes the unused `ssm` execution target. The payload still contains exactly seven fields.
 
-### Request Body
-```json
-{
-  "job_parameters_b64": "<base64-encoded JSON>"
-}
-```
+## Submission
 
-### Decoded Job Payload Schema
-```json
-{
-  "git_repo": "string",              // required -- "org/repo"
-  "git_token_location": "string",    // required -- "aws:::ssm:/path"
-  "username": "string",              // required
-  "commit_hash": "string",           // optional -- pins git checkout version
-  "flow_label": "string",            // optional -- default "exec"
-  "job_timeout": int,                // optional -- default 3600 seconds
-  "pr_number": int,                  // one of pr_number/issue_number required
-  "issue_number": int,
-  "sops_key_ssm_path": "string",    // optional -- SSM path to pre-existing age key
-  "orders": [Order]                  // required -- at least 1
-}
-```
+A caller submits the flat JSON payload below to `init_job` (Lambda, SNS, or direct invoke).
 
-### Order Schema
-```json
-{
-  "order_name": "string",            // optional -- auto-generated if missing
-  "cmds": ["string"],                // required -- non-empty list of commands
-  "timeout": int,                    // required -- positive seconds
-  "execution_target": "lambda|codebuild|ssm",  // required -- one of "lambda", "codebuild", or "ssm"
-  "git_folder": "string",            // optional -- subdirectory for checkout
-  "must_succeed": bool,              // optional -- default true
-  "queue_id": "string",              // optional -- for serialization
-  "dependencies": ["order_name"],    // optional -- run after named orders
-  "env_vars": {"key": "value"},      // optional
-  "ssm_paths": ["/path"],            // optional -- SSM params to inject
-  "secret_manager_paths": ["/path"]  // optional -- Secrets Manager refs
-}
-```
+| Field | Rule |
+| --- | --- |
+| `trigger_id` | Required. Uniquely identifies the execution. |
+| `s3_package_uri` | Required. S3 URI of the prepared zip package. |
+| `sops_type` | Nullable. One of `ssm`, `kms`, or `null`. |
+| `sops_path` | Nullable. Required when `sops_type` is `ssm`. |
+| `commands_b64` | Required. Base64-encoded JSON array of shell commands. |
+| `done_endpoint` | Required. S3 URI where the result marker is written. |
+| `execution_target` | Required. One of `lambda` or `codebuild`. |
 
-### Success Response (HTTP 200)
+Here, `sops_type="ssm"` means that the SOPS age key is stored in AWS Systems Manager Parameter Store. It is independent of the removed SSM execution target.
+
+Acknowledgement on dispatch:
+
 ```json
 {
   "status": "ok",
-  "run_id": "uuid",
-  "trace_id": "8-char-hex",
-  "flow_id": "username:trace_id-flow_label",
-  "done_endpt": "s3://bucket/run_id/done"
+  "trigger_id": "string"
 }
 ```
 
-### Error Response (HTTP 400/500)
+## Dispatch and execution
+
+`init_job` validates the payload and routes to:
+
+- `lambda`: asynchronous invocation of `AWS_EXE_SYS_WORKER_LAMBDA`.
+- `codebuild`: start a build in `AWS_EXE_SYS_CODEBUILD_PROJECT` with all seven fields as environment variables.
+
+The payload is passed as plain string values to each target.
+
+## Result
+
+`worker` writes one `ExecutionResult` object to `done_endpoint`:
+
 ```json
 {
-  "status": "error",
-  "error": "string",
-  "errors": ["string"],             // validation errors only
-  "run_id": "uuid",                 // if allocated
-  "trace_id": "string"              // if allocated
+  "trigger_id": "string",
+  "status": "succeeded|failed",
+  "steps": [
+    {
+      "step_name": "step-0",
+      "status": "succeeded|failed",
+      "exit_code": 0,
+      "duration_seconds": 1.23,
+      "output": "combined stdout+stderr"
+    }
+  ],
+  "error": "present only when status is failed"
 }
 ```
 
-## 2. Done Endpoint (S3)
-
-### Location
-- URI: s3://{done_bucket}/{run_id}/done
-- Provided in init response as `done_endpt`
-- Consumer parses URI: bucket = URI[5:].split("/",1)[0], key = URI[5:].split("/",1)[1]
-
-### Content
-```json
-{
-  "status": "succeeded|failed|timed_out",
-  "summary": {
-    "succeeded": int,
-    "failed": int,
-    "timed_out": int
-  }
-}
-```
-
-## 3. Order Events (DynamoDB)
-
-### Table
-- Name: provided via Terraform output (consumer reads from env var)
-- Partition key: `trace_id` (String)
-- Sort key: `sk` (String). The literal format produced by `put_event()` is:
-
-  ```python
-  sk = "{order_name}:{epoch}:{event_type}"
-  ```
-
-  `:event_type` is load-bearing: two events within the same epoch (e.g., a `tf_plan` and a `tf_validate` emitted in the same second) would otherwise collide on the same PK+SK and one would overwrite the other.
-- GSI: `order_name` (HASH) + `epoch` (RANGE) -- for per-order queries
-
-### Event Record Schema
-```json
-{
-  "trace_id": "string",              // partition key
-  "sk": "order_name:epoch:event_type", // sort key
-  "order_name": "string",
-  "epoch": "string",
-  "event_type": "string",            // e.g., "tf_plan", "tf_validate", "tfsec"
-  "status": "string",                // e.g., "info", "success", "error"
-  "flow_id": "string",               // metadata -- top level
-  "run_id": "string",                // metadata -- top level
-  "data": {                           // subprocess payload -- NESTED MAP
-    "add": int,                       // example: tf_plan fields
-    "change": int,
-    "destroy": int,
-    "output": "string",
-    "...": "..."                      // varies by event_type
-  }
-}
-```
-
-### Access Patterns
-- All events for a job: Query by `trace_id`
-- Events for one order: Query by `trace_id` + `begins_with(sk, "order_name:")`
-- Subprocess data: `event["data"]` (nested map, never flattened)
-
-## 4. Orders Table (DynamoDB)
-
-### Table
-- Name: provided via Terraform output
-- Partition key: `pk` (String, format: "{run_id}:{order_num}")
-- GSI: `run_id` (HASH) + `order_num` (RANGE), name: `run_id-order_num-index`
-
-### Access Patterns
-- All orders for a run: Query GSI by `run_id`
-- Single order: GetItem by `pk`
-
-## 5. Resource Discovery
-All resource names are Terraform outputs. Consumers read them via environment variables:
-- `AWS_EXE_SYS_ORDERS_TABLE`
-- `AWS_EXE_SYS_ORDER_EVENTS_TABLE`
-- `AWS_EXE_SYS_LOCKS_TABLE`
-- `AWS_EXE_SYS_INTERNAL_BUCKET`
-- `AWS_EXE_SYS_DONE_BUCKET`
-No hardcoded resource names across system boundaries.
-
-## 6. Authentication
-- Same-account callers: IAM SigV4 on API Gateway
-- Lambda Function URL: IAM auth (direct invoke path)
-- External callers: TBD (JWT planned)
-- GitHub -> caller: HMAC (X-Hub-Signature-256). This is NOT engine's concern.
+Presence of this object is terminal. A result-write failure is raised by the worker rather than being reported as successful execution.

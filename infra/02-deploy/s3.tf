@@ -9,6 +9,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "internal" {
   rule {
     id     = "expire-after-1-day"
     status = "Enabled"
+    filter {}
 
     expiration {
       days = 1
@@ -46,6 +47,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "done" {
   rule {
     id     = "expire-after-1-day"
     status = "Enabled"
+    filter {}
 
     expiration {
       days = 1

@@ -3,8 +3,7 @@
 import json
 from unittest.mock import MagicMock
 
-from aws_exe_sys.common.lambda_handler import normalize_event, apigw_response, lambda_handler
-
+from aws_exe_sys.common.lambda_handler import apigw_response, lambda_handler, normalize_event
 
 # ── normalize_event ─────────────────────────────────────────────────
 

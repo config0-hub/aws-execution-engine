@@ -1,0 +1,12 @@
+line-length = 120
+target-version = "py314"
+
+extend-exclude = [".original", "scratch", "backups", "golang-shellout"]
+
+[lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+ignore = ["E501", "B008", "SIM108", "SIM117"]
+
+[lint.isort]
+force-sort-within-sections = true
+known-first-party = ["aws_exe_sys"]

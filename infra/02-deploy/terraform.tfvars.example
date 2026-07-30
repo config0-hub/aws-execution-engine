@@ -1,4 +1,12 @@
-image_tag      = "latest"
-ecr_repo       = "<ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/aws-exe-sys"
-aws_region     = "us-east-1"
-project_prefix = "aws-exe-sys"
+# Example Terraform variables for `infra/02-deploy` (local plan/apply)
+project_prefix        = "xe"
+kms_key_arn           = "arn:aws:kms:ap-northeast-1:<ACCOUNT_ID>:key/<KEY_ID>"
+engine_zip_s3_bucket  = "my-packages-bucket"
+engine_zip_s3_key     = "engine.zip"
+sops_age_layer_s3_key = "sops-age-layer.zip"
+
+# Optional access to caller-managed buckets in addition to <project_prefix>-internal/done.
+additional_package_bucket_arns = ["arn:aws:s3:::my-package-bucket"]
+additional_result_bucket_arns  = ["arn:aws:s3:::my-result-bucket"]
+
+# Provider region is inherited from the caller (or set via AWS_DEFAULT_REGION).

@@ -1,0 +1,13 @@
+{
+  "trigger_id": "trg-golden-001",
+  "status": "succeeded",
+  "steps": [
+    {
+      "step_name": "step-0",
+      "status": "succeeded",
+      "exit_code": 0,
+      "duration_seconds": 1.23,
+      "output": "hello world\n"
+    }
+  ]
+}
