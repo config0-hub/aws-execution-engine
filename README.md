@@ -2,10 +2,10 @@
 
 `aws_exe_sys` is a small AWS-native execution adapter.
 
-It provides a two-step flow:
+It provides a caller-facing flow:
 
 1. `init_job` receives a **7-field payload** and dispatches to a target.
-2. `worker` executes the commands and writes an `ExecutionResult` to S3.
+2. The selected runtime writes an `ExecutionResult` to S3.
 
 CodeBuild requests are owned by a Standard Step Functions workflow, which waits for the build and invokes a
 fallback finalizer so a pre-worker CodeBuild failure cannot leave the caller waiting forever.
