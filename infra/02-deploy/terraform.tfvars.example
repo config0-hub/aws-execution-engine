@@ -5,7 +5,8 @@ engine_zip_s3_bucket  = "my-packages-bucket"
 engine_zip_s3_key     = "engine.zip"
 sops_age_layer_s3_key = "sops-age-layer.zip"
 
-# Optional access to caller-managed buckets in addition to <project_prefix>-internal/done.
+# Optional access to caller-managed buckets in addition to the default
+# <project_prefix>-engine-{internal,done}-<account-id> buckets.
 additional_package_bucket_arns = ["arn:aws:s3:::my-package-bucket"]
 additional_result_bucket_arns  = ["arn:aws:s3:::my-result-bucket"]
 

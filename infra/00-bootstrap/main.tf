@@ -18,6 +18,33 @@ provider "aws" {
 resource "aws_s3_bucket" "state" {
   bucket        = var.state_bucket_name
   force_destroy = false
+
+  tags = {
+    # Ownership marker read by the justfile's adoption logic. NOT atomic with
+    # creation (S3 CreateBucket carries no tags; terraform tags in a follow-up
+    # call) — the crash window is covered by the surviving LOCAL bootstrap
+    # state, and an untagged bucket without that proof aborts the install.
+    ManagedBy = "engine-00-bootstrap"
+    Purpose   = "terraform-state"
+  }
+}
+
+# Standalone installs need their own lock table; a combined install adopts the
+# iac-ci bucket AND its lock table instead (this root is never applied then).
+resource "aws_dynamodb_table" "locks" {
+  name         = var.lock_table_name
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "LockID"
+
+  attribute {
+    name = "LockID"
+    type = "S"
+  }
+
+  tags = {
+    ManagedBy = "engine-00-bootstrap"
+    Purpose   = "terraform-state-lock"
+  }
 }
 
 resource "aws_s3_bucket_versioning" "state" {

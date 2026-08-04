@@ -20,8 +20,9 @@ for var in PREFIX AWS_REGION; do
 	fi
 done
 
-INTERNAL_BUCKET="${PREFIX}-internal"
-DONE_BUCKET="${PREFIX}-done"
+ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+INTERNAL_BUCKET="${PREFIX}-engine-internal-${ACCOUNT_ID}"
+DONE_BUCKET="${PREFIX}-engine-done-${ACCOUNT_ID}"
 
 for SUFFIX in init-job worker finalizer; do
 	FUNC="${PREFIX}-${SUFFIX}"

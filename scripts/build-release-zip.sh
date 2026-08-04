@@ -137,5 +137,5 @@ docker run --rm \
 
 printf '%s\n' "=== Release artifacts ==="
 for artifact in "$DIST_DIR/engine.zip" "$DIST_DIR/sops-age-layer.zip"; do
-	printf '  %s (%s bytes)\n' "$artifact" "$(stat -c%s "$artifact")"
+	printf '  %s (%s bytes)\n' "$artifact" "$(wc -c <"$artifact" | tr -d ' ')"
 done

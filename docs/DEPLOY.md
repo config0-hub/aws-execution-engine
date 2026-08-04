@@ -42,8 +42,11 @@ terraform init
 terraform apply
 ```
 
-By default, deployed roles read packages from `<project_prefix>-internal` and write results to
-`<project_prefix>-done`. Configure the additional bucket ARN lists when payloads use other buckets.
+By default, deployed roles read packages from `<project_prefix>-engine-internal-<account-id>`
+and write results to `<project_prefix>-engine-done-<account-id>` (account-suffixed because S3
+names are global; engine-segmented so the iac-ci foundation's `<prefix>-done-<account-id>`
+bucket is never dual-owned). Configure the additional bucket ARN lists when payloads use
+other buckets.
 
 ## CodeBuild orchestration
 
