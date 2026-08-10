@@ -29,7 +29,7 @@ class SimplePayload:
         done_endpoint:    S3 URI where the result should be written.
         execution_target: One of "lambda" or "codebuild".
         timeout_seconds:  The execution's overall timeout in seconds. Required
-                          and must be a positive integer — there is no default.
+                          and must be a positive integer - there is no default.
     """
 
     trigger_id: str
@@ -64,7 +64,7 @@ class SimplePayload:
 
         The dispatcher serialises fields to strings for the CodeBuild env
         transport, so a JSON int may arrive as ``"3600"``. Anything absent or
-        non-numeric collapses to 0, which validate() rejects — the field is
+        non-numeric collapses to 0, which validate() rejects - the field is
         required with no default.
         """
         if isinstance(value, bool):

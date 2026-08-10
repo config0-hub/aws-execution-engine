@@ -19,7 +19,7 @@ resource "aws_codebuild_project" "worker" {
     type = "NO_ARTIFACTS"
   }
 
-  # S3 build logs land at s3://<bucket>/codebuild/logs/<build-id>.gz — the
+  # S3 build logs land at s3://<bucket>/codebuild/logs/<build-id>.gz - the
   # path the config0_publisher log reader expects. CloudWatch logs stay on.
   dynamic "logs_config" {
     for_each = var.s3_log_bucket_name != "" ? [1] : []

@@ -1,5 +1,5 @@
 #!/bin/bash
-# CodeBuild entrypoint — reads 8 SimplePayload fields from env vars and runs the worker.
+# CodeBuild entrypoint - reads 8 SimplePayload fields from env vars and runs the worker.
 # ENGINE_TASK_ROOT is set by the CodeBuild buildspec to wherever engine.zip was unzipped.
 # Defaults to /var/task (the Lambda runtime convention) for backward compat.
 set -euo pipefail
