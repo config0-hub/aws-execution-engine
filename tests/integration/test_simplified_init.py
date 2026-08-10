@@ -76,7 +76,7 @@ class TestInitValidPayloadDispatch:
         assert call_kwargs["InvocationType"] == "Event"
         sent = json.loads(call_kwargs["Payload"].decode())
         assert sent["trigger_id"] == "trg-int-001"
-        assert len(sent) == 7
+        assert len(sent) == 8
 
     def test_dispatch_to_codebuild(self, monkeypatch):
         state_machine_arn = "arn:aws:states:us-east-1:123:stateMachine:xe"
@@ -105,8 +105,17 @@ class TestInitValidPayloadDispatch:
         call_kwargs = mock_stepfunctions.start_execution.call_args.kwargs
         assert call_kwargs["stateMachineArn"] == state_machine_arn
         sent = json.loads(call_kwargs["input"])
-        assert set(sent) == set(_valid_event())
-        assert all(isinstance(value, str) for value in sent.values())
+        # The SFN input is the 8 SimplePayload fields plus the two derived
+        # timeout fields the state machine consumes.
+        assert set(sent) == set(_valid_event()) | {
+            "build_timeout_minutes",
+            "sfn_timeout_seconds",
+        }
+        assert all(
+            isinstance(sent[field], str) for field in _valid_event()
+        )
+        assert isinstance(sent["build_timeout_minutes"], int)
+        assert isinstance(sent["sfn_timeout_seconds"], int)
         mock_stepfunctions.start_build.assert_not_called()
 
 

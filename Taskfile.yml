@@ -11,7 +11,25 @@ tasks:
       - docker build -f docker/Dockerfile.test -t aws-execution-engine-test:latest .
       - docker run --rm aws-execution-engine-test:latest
 
+  test:integration:
+    desc: >-
+      Run the integration suite (mocked AWS SDK) in the same Dockerfile.test
+      harness, overriding the unit-only default CMD.
+    cmds:
+      - docker build -f docker/Dockerfile.test -t aws-execution-engine-test:latest .
+      - docker run --rm aws-execution-engine-test:latest tests/integration/ -v
+
   check:tf:
     desc: Terraform formatting check for the infra trees (no init, no apply).
     cmds:
       - tofu fmt -recursive -check infra/
+
+  check:tf:validate:
+    desc: >-
+      Terraform validation for the infra trees. Backendless init (no state,
+      no apply) then tofu validate per tree.
+    cmds:
+      - tofu -chdir=infra/00-bootstrap init -backend=false -input=false > /dev/null
+      - tofu -chdir=infra/00-bootstrap validate
+      - tofu -chdir=infra/02-deploy init -backend=false -input=false > /dev/null
+      - tofu -chdir=infra/02-deploy validate
