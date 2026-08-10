@@ -10,7 +10,7 @@ resource "aws_codebuild_project" "worker" {
     compute_type                = local.codebuild_compute
     image                       = "aws/codebuild/standard:7.0"
     type                        = "LINUX_CONTAINER"
-    privileged_mode             = false
+    privileged_mode             = true
     image_pull_credentials_type = "CODEBUILD"
 
     environment_variable {
