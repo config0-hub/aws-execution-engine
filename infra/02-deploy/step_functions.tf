@@ -61,6 +61,10 @@ resource "aws_sfn_state_machine" "codebuild" {
       RunCodeBuild = {
         Type     = "Task"
         Resource = "arn:${data.aws_partition.current.partition}:states:::codebuild:startBuild.sync"
+        # build_timeout (15 min) plus provisioning margin: a stuck
+        # startBuild.sync times the state out into the Catch -> FinalizeResult
+        # path instead of hanging the workflow forever.
+        TimeoutSeconds = 1200
         Parameters = {
           ProjectName = aws_codebuild_project.worker.name
           EnvironmentVariablesOverride = [

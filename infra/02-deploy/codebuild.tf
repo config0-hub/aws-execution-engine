@@ -2,6 +2,11 @@ resource "aws_codebuild_project" "worker" {
   name         = "${local.prefix}-worker"
   service_role = aws_iam_role.codebuild.arn
 
+  # Hard runtime bound: CodeBuild stops the build after 15 minutes, matching
+  # the platform's 900-second worker-watch ceiling - a build the watch has
+  # abandoned cannot keep running and race a requeued execution.
+  build_timeout = 15
+
   artifacts {
     type = "NO_ARTIFACTS"
   }
