@@ -2,6 +2,23 @@ resource "aws_codebuild_project" "worker" {
   name         = "${local.prefix}-worker"
   service_role = aws_iam_role.codebuild.arn
 
+  # Two clocks bound the build against the platform's 900s watch from FIRE:
+  #   queued_timeout (5 min = 300s) + build_timeout (10 min = 600s) = 900s.
+  # Verified AWS semantics (CodeBuild API reference, Project type):
+  #   - queuedTimeoutInMinutes: "The number of minutes a build is allowed to
+  #     be queued before it times out." Covers the QUEUED phase only.
+  #     Minimum allowed value is 5, so 300s is the tightest enforceable bound.
+  #   - timeoutInMinutes: "How long, in minutes ... for AWS CodeBuild to wait
+  #     before timing out any related build that did not get marked as
+  #     completed." This is the post-queue build clock.
+  # HONEST GAP: AWS does not explicitly document which clock the PROVISIONING
+  # phase counts against. If provisioning falls outside both clocks, the
+  # 300 + 600 arithmetic is not a proof; the Step Functions TimeoutSeconds
+  # (step_functions.tf) stays the wall-clock backstop that bounds the whole
+  # startBuild.sync task, provisioning included.
+  build_timeout  = 10
+  queued_timeout = 5
+
   artifacts {
     type = "NO_ARTIFACTS"
   }
@@ -10,7 +27,7 @@ resource "aws_codebuild_project" "worker" {
     compute_type                = local.codebuild_compute
     image                       = "aws/codebuild/standard:7.0"
     type                        = "LINUX_CONTAINER"
-    privileged_mode             = false
+    privileged_mode             = true
     image_pull_credentials_type = "CODEBUILD"
 
     environment_variable {
