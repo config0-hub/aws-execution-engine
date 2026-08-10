@@ -1,0 +1,17 @@
+version: "3"
+
+# Component Taskfile for the aws-execution-engine repo. Mirrors what the
+# Woodpecker pipeline runs: build the Dockerfile.test image (which lints with
+# ruff and copies the contract-drift inputs) and run the unit suite.
+
+tasks:
+  test:
+    desc: Build the Dockerfile.test image and run the unit tests.
+    cmds:
+      - docker build -f docker/Dockerfile.test -t aws-execution-engine-test:latest .
+      - docker run --rm aws-execution-engine-test:latest
+
+  check:tf:
+    desc: Terraform formatting check for the infra trees (no init, no apply).
+    cmds:
+      - tofu fmt -recursive -check infra/
