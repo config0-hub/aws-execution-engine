@@ -28,13 +28,14 @@ def _valid_payload(**overrides) -> SimplePayload:
         "commands_b64": _b64_cmds(["echo hello"]),
         "done_endpoint": "s3://done-bucket/trg-001/result.json",
         "execution_target": "lambda",
+        "timeout_seconds": 3600,
     }
     defaults.update(overrides)
     return SimplePayload(**defaults)
 
 
 class TestPayloadToDict:
-    def test_all_7_fields_present(self):
+    def test_all_8_fields_present(self):
         payload = _valid_payload()
         d = _payload_to_dict(payload)
         assert set(d.keys()) == {
@@ -45,8 +46,10 @@ class TestPayloadToDict:
             "commands_b64",
             "done_endpoint",
             "execution_target",
+            "timeout_seconds",
         }
         assert d["trigger_id"] == "trg-001"
+        assert d["timeout_seconds"] == "3600"
         assert d["sops_type"] == "ssm"
 
     def test_none_values_become_empty_string(self):
@@ -73,7 +76,7 @@ class TestDispatchToLambda:
         mock_client.invoke.assert_called_once()
 
     @patch("aws_exe_sys.init_job.dispatcher.boto3")
-    def test_passes_all_7_fields_in_payload(self, mock_boto3, monkeypatch):
+    def test_passes_all_8_fields_in_payload(self, mock_boto3, monkeypatch):
         monkeypatch.setenv("AWS_EXE_SYS_WORKER_LAMBDA", "my-worker-fn")
 
         mock_client = MagicMock()
@@ -95,7 +98,8 @@ class TestDispatchToLambda:
         assert sent_payload["done_endpoint"] == "s3://done-bucket/trg-001/result.json"
         assert sent_payload["execution_target"] == "lambda"
         assert sent_payload["commands_b64"] == payload.commands_b64
-        assert len(sent_payload) == 7
+        assert sent_payload["timeout_seconds"] == "3600"
+        assert len(sent_payload) == 8
 
 
 class TestDispatchToCodeBuild:
@@ -119,7 +123,7 @@ class TestDispatchToCodeBuild:
 
     @patch("aws_exe_sys.init_job.dispatcher.uuid.uuid4")
     @patch("aws_exe_sys.init_job.dispatcher.boto3")
-    def test_passes_exactly_7_plain_string_fields(self, mock_boto3, mock_uuid4, monkeypatch):
+    def test_passes_8_plain_string_fields_plus_derived_timeouts(self, mock_boto3, mock_uuid4, monkeypatch):
         state_machine_arn = "arn:aws:states:us-east-1:123:stateMachine:xe"
         monkeypatch.setenv("AWS_EXE_SYS_CODEBUILD_STATE_MACHINE_ARN", state_machine_arn)
         mock_uuid4.return_value.hex = "unique123"
@@ -143,10 +147,19 @@ class TestDispatchToCodeBuild:
             "commands_b64",
             "done_endpoint",
             "execution_target",
+            "timeout_seconds",
+            "build_timeout_minutes",
+            "sfn_timeout_seconds",
         }
-        assert all(isinstance(value, str) for value in sent_payload.values())
+        payload_fields = {k: v for k, v in sent_payload.items()
+                          if k not in ("build_timeout_minutes", "sfn_timeout_seconds")}
+        assert all(isinstance(value, str) for value in payload_fields.values())
         assert sent_payload["sops_type"] == ""
         assert sent_payload["sops_path"] == ""
+        # Derived numeric workflow inputs follow timeout_seconds:
+        # ceil(3600/60) + 3 margin minutes; 3600 + 300 queued + 300 margin.
+        assert sent_payload["build_timeout_minutes"] == 63
+        assert sent_payload["sfn_timeout_seconds"] == 4200
 
     @patch("aws_exe_sys.init_job.dispatcher.boto3")
     def test_missing_state_machine_configuration_fails_loudly(self, mock_boto3, monkeypatch):

@@ -23,6 +23,7 @@ def _valid_payload(**overrides) -> SimplePayload:
         "commands_b64": _b64_cmds(["echo hello"]),
         "done_endpoint": "s3://done-bucket/trg-001/result.json",
         "execution_target": "lambda",
+        "timeout_seconds": 3600,
     }
     defaults.update(overrides)
     return SimplePayload(**defaults)
@@ -57,6 +58,7 @@ class TestSimplePayloadFromDict:
             "commands_b64": _b64_cmds(["ls"]),
             "done_endpoint": "s3://done/result",
             "execution_target": "codebuild",
+        "timeout_seconds": 3600,
         }
         p = SimplePayload.from_dict(data)
         assert p.trigger_id == "t-99"
@@ -112,6 +114,7 @@ def _dict_with(**overrides) -> dict:
         "commands_b64": _b64_cmds(["echo hello"]),
         "done_endpoint": "s3://done-bucket/trg-001/result.json",
         "execution_target": "lambda",
+        "timeout_seconds": 3600,
     }
     data.update(overrides)
     return data

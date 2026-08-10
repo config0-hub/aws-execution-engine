@@ -18,7 +18,7 @@ def _b64_cmds(cmds: list[str]) -> str:
 
 
 def _valid_event(**overrides) -> dict:
-    """Build a valid direct-invoke event dict with all 7 fields."""
+    """Build a valid direct-invoke event dict with all 8 fields."""
     defaults = {
         "trigger_id": "trg-int-001",
         "s3_package_uri": "s3://test-bucket/exec/trg-int-001/exec.zip",
@@ -27,6 +27,7 @@ def _valid_event(**overrides) -> dict:
         "commands_b64": _b64_cmds(["echo hello"]),
         "done_endpoint": "s3://done-bucket/trg-int-001/result.json",
         "execution_target": "lambda",
+        "timeout_seconds": 3600,
     }
     defaults.update(overrides)
     return defaults

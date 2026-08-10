@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 import os
 import uuid
 
@@ -19,7 +20,18 @@ _PAYLOAD_FIELDS = (
     "commands_b64",
     "done_endpoint",
     "execution_target",
+    "timeout_seconds",
 )
+
+# Margin added on top of timeout_seconds for the per-build CodeBuild override
+# (ceil to minutes), so CodeBuild's own clock never cuts the work short of the
+# caller's timeout.
+_CODEBUILD_TIMEOUT_MARGIN_MINUTES = 3
+
+# The CodeBuild QUEUED phase bound (queued_timeout = 5 min) plus a margin for
+# provisioning: added on top of timeout_seconds for the Step Functions state
+# timeout, the wall-clock backstop over the whole startBuild.sync task.
+_SFN_TIMEOUT_MARGIN_SECONDS = 300 + 300
 
 
 def _payload_to_dict(payload: SimplePayload) -> dict[str, str]:
@@ -28,7 +40,7 @@ def _payload_to_dict(payload: SimplePayload) -> dict[str, str]:
 
 
 def dispatch_to_lambda(payload: SimplePayload) -> dict:
-    """Invoke the worker Lambda with all 7 payload fields."""
+    """Invoke the worker Lambda with all 8 payload fields."""
     function_name = os.environ["AWS_EXE_SYS_WORKER_LAMBDA"]
     client = boto3.client("lambda")
 
@@ -50,10 +62,20 @@ def dispatch_to_codebuild(payload: SimplePayload) -> dict:
     client = boto3.client("stepfunctions")
     execution_name = f"aws-exe-{uuid.uuid4().hex}"
 
+    # The 8 payload fields ride as strings (CodeBuild env transport). The two
+    # derived numeric fields are computed here because the state machine's
+    # JSONPath cannot do arithmetic: the per-build CodeBuild timeout override
+    # and the Step Functions state timeout both follow timeout_seconds.
+    sfn_input: dict[str, object] = dict(_payload_to_dict(payload))
+    sfn_input["build_timeout_minutes"] = (
+        math.ceil(payload.timeout_seconds / 60) + _CODEBUILD_TIMEOUT_MARGIN_MINUTES
+    )
+    sfn_input["sfn_timeout_seconds"] = payload.timeout_seconds + _SFN_TIMEOUT_MARGIN_SECONDS
+
     response = client.start_execution(
         stateMachineArn=state_machine_arn,
         name=execution_name,
-        input=json.dumps(_payload_to_dict(payload)),
+        input=json.dumps(sfn_input),
     )
     logger.info(
         "Dispatched CodeBuild workflow",

@@ -89,6 +89,7 @@ if __name__ == "__main__":
         commands_b64=os.environ.get("COMMANDS_B64", ""),
         done_endpoint=os.environ.get("DONE_ENDPOINT", ""),
         execution_target=os.environ.get("EXECUTION_TARGET", ""),
+        timeout_seconds=SimplePayload._coerce_int(os.environ.get("TIMEOUT_SECONDS")),
     )
     payload.validate()
     status = run(

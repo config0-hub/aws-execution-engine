@@ -61,15 +61,20 @@ resource "aws_sfn_state_machine" "codebuild" {
       RunCodeBuild = {
         Type     = "Task"
         Resource = "arn:${data.aws_partition.current.partition}:states:::codebuild:startBuild.sync"
-        # queued_timeout (5 min = 300s) + build_timeout (10 min = 600s) + 300s
-        # margin: this is the WALL-CLOCK backstop over the whole
-        # startBuild.sync task - it also covers the PROVISIONING phase, which
-        # AWS does not explicitly assign to either CodeBuild clock
-        # (codebuild.tf). A stuck build times the state out into the
+        # Deadline-driven wall-clock backstop over the whole startBuild.sync
+        # task: the dispatcher computes sfn_timeout_seconds =
+        # timeout_seconds + queued bound (300s) + provisioning margin (300s)
+        # and passes it in the execution input - the PROVISIONING phase is not
+        # explicitly assigned to either CodeBuild clock, so the margin covers
+        # it. A stuck build times the state out into the
         # Catch -> FinalizeResult path instead of hanging the workflow forever.
-        TimeoutSeconds = 1200
+        TimeoutSecondsPath = "$.sfn_timeout_seconds"
         Parameters = {
           ProjectName = aws_codebuild_project.worker.name
+          # Per-build override derived from timeout_seconds + margin (ceil to
+          # minutes) by the dispatcher; the project's static build_timeout is
+          # only a generous ceiling the override stays under.
+          "TimeoutInMinutesOverride.$" = "$.build_timeout_minutes"
           EnvironmentVariablesOverride = [
             {
               Name      = "TRIGGER_ID"
@@ -104,6 +109,11 @@ resource "aws_sfn_state_machine" "codebuild" {
             {
               Name      = "EXECUTION_TARGET"
               "Value.$" = "$.execution_target"
+              Type      = "PLAINTEXT"
+            },
+            {
+              Name      = "TIMEOUT_SECONDS"
+              "Value.$" = "$.timeout_seconds"
               Type      = "PLAINTEXT"
             },
           ]
