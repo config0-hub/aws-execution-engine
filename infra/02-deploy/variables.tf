@@ -61,6 +61,12 @@ variable "additional_package_bucket_arns" {
   }
 }
 
+variable "s3_log_bucket_name" {
+  description = "S3 bucket for CodeBuild build logs (written under codebuild/logs/). Empty disables S3 logs."
+  type        = string
+  default     = ""
+}
+
 variable "additional_result_bucket_arns" {
   description = "Additional S3 bucket ARNs to which workers may write terminal results."
   type        = list(string)
