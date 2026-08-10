@@ -61,9 +61,12 @@ resource "aws_sfn_state_machine" "codebuild" {
       RunCodeBuild = {
         Type     = "Task"
         Resource = "arn:${data.aws_partition.current.partition}:states:::codebuild:startBuild.sync"
-        # build_timeout (10 min = 600s) + 300s queue/provisioning + margin: a stuck
-        # startBuild.sync times the state out into the Catch -> FinalizeResult
-        # path instead of hanging the workflow forever.
+        # queued_timeout (5 min = 300s) + build_timeout (10 min = 600s) + 300s
+        # margin: this is the WALL-CLOCK backstop over the whole
+        # startBuild.sync task - it also covers the PROVISIONING phase, which
+        # AWS does not explicitly assign to either CodeBuild clock
+        # (codebuild.tf). A stuck build times the state out into the
+        # Catch -> FinalizeResult path instead of hanging the workflow forever.
         TimeoutSeconds = 1200
         Parameters = {
           ProjectName = aws_codebuild_project.worker.name
