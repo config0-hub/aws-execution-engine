@@ -28,6 +28,8 @@ class SimplePayload:
         commands_b64:     Base64-encoded JSON array of shell commands.
         done_endpoint:    S3 URI where the result should be written.
         execution_target: One of "lambda" or "codebuild".
+        timeout_seconds:  The execution's overall timeout in seconds. Required
+                          and must be a positive integer - there is no default.
     """
 
     trigger_id: str
@@ -37,6 +39,7 @@ class SimplePayload:
     commands_b64: str
     done_endpoint: str
     execution_target: str
+    timeout_seconds: int
 
     @staticmethod
     def _coerce_null(value: object) -> str | None:
@@ -55,6 +58,25 @@ class SimplePayload:
             return None
         return value  # type: ignore[return-value]
 
+    @staticmethod
+    def _coerce_int(value: object) -> int:
+        """Coerce timeout_seconds from its transport shapes to an int.
+
+        The dispatcher serialises fields to strings for the CodeBuild env
+        transport, so a JSON int may arrive as ``"3600"``. Anything absent or
+        non-numeric collapses to 0, which validate() rejects - the field is
+        required with no default.
+        """
+        if isinstance(value, bool):
+            return 0
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.lstrip("-").isdigit():
+                return int(stripped)
+        return 0
+
     @classmethod
     def from_dict(cls, data: dict) -> SimplePayload:
         return cls(
@@ -65,6 +87,7 @@ class SimplePayload:
             commands_b64=data.get("commands_b64", ""),
             done_endpoint=data.get("done_endpoint", ""),
             execution_target=data.get("execution_target", ""),
+            timeout_seconds=cls._coerce_int(data.get("timeout_seconds")),
         )
 
     def validate(self) -> None:
@@ -107,6 +130,11 @@ class SimplePayload:
         if self.execution_target not in _VALID_EXECUTION_TARGETS:
             errors.append(
                 f"execution_target must be one of {sorted(_VALID_EXECUTION_TARGETS)}, got {self.execution_target!r}"
+            )
+
+        if not isinstance(self.timeout_seconds, int) or isinstance(self.timeout_seconds, bool) or self.timeout_seconds <= 0:
+            errors.append(
+                f"timeout_seconds must be a positive integer, got {self.timeout_seconds!r}"
             )
 
         if errors:

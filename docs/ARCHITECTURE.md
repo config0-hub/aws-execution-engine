@@ -13,7 +13,7 @@ This repository implements a minimal, provider-agnostic executor.
   - runs the command list from `commands_b64`
   - writes the detailed terminal `ExecutionResult` to `done_endpoint`
 - **CodeBuild workflow** (Standard Step Functions):
-  - starts CodeBuild with all seven payload fields as plaintext environment overrides
+  - starts CodeBuild with all eight payload fields as plaintext environment overrides
   - waits for CodeBuild to reach a terminal state
   - invokes the finalizer on both success and caught failure
 - **`finalizer`** (`aws_exe_sys.finalizer`):

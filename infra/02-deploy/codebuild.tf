@@ -2,25 +2,33 @@ resource "aws_codebuild_project" "worker" {
   name         = "${local.prefix}-worker"
   service_role = aws_iam_role.codebuild.arn
 
-  # Two clocks bound the build against the platform's 900s watch from FIRE:
-  #   queued_timeout (5 min = 300s) + build_timeout (10 min = 600s) = 900s.
-  # Verified AWS semantics (CodeBuild API reference, Project type):
-  #   - queuedTimeoutInMinutes: "The number of minutes a build is allowed to
-  #     be queued before it times out." Covers the QUEUED phase only.
-  #     Minimum allowed value is 5, so 300s is the tightest enforceable bound.
-  #   - timeoutInMinutes: "How long, in minutes ... for AWS CodeBuild to wait
-  #     before timing out any related build that did not get marked as
-  #     completed." This is the post-queue build clock.
+  # The REAL per-build bound is the TimeoutInMinutesOverride the Step
+  # Functions RunCodeBuild task passes (derived from the payload's
+  # timeout_seconds plus a small margin - step_functions.tf). The static
+  # build_timeout here is only a generous ceiling that per-build overrides
+  # stay under. queued_timeout covers the QUEUED phase only (minimum 5).
   # HONEST GAP: AWS does not explicitly document which clock the PROVISIONING
-  # phase counts against. If provisioning falls outside both clocks, the
-  # 300 + 600 arithmetic is not a proof; the Step Functions TimeoutSeconds
-  # (step_functions.tf) stays the wall-clock backstop that bounds the whole
-  # startBuild.sync task, provisioning included.
-  build_timeout  = 10
+  # phase counts against; the Step Functions state timeout
+  # (sfn_timeout_seconds = timeout_seconds + queued bound + margin) stays the
+  # wall-clock backstop that bounds the whole startBuild.sync task,
+  # provisioning included.
+  build_timeout  = 480
   queued_timeout = 5
 
   artifacts {
     type = "NO_ARTIFACTS"
+  }
+
+  # S3 build logs land at s3://<bucket>/codebuild/logs/<build-id>.gz - the
+  # path the config0_publisher log reader expects. CloudWatch logs stay on.
+  dynamic "logs_config" {
+    for_each = var.s3_log_bucket_name != "" ? [1] : []
+    content {
+      s3_logs {
+        status   = "ENABLED"
+        location = "${var.s3_log_bucket_name}/codebuild/logs"
+      }
+    }
   }
 
   environment {

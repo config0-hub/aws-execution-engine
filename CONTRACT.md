@@ -1,12 +1,12 @@
 # AWS execution engine wire contract
 
-Version: 3.0
+Version: 4.0
 
 `aws_exe_sys` is a generic command runner. It accepts a prepared command payload,
 executes it on a selected target (`lambda` or `codebuild`), and uses one S3 `ExecutionResult` object as the
 terminal marker.
 
-Version 3.0 removes the unused `ssm` execution target. The payload still contains exactly seven fields.
+Version 4.0 adds the required `timeout_seconds` field. The payload contains exactly eight fields.
 
 ## Submission
 
@@ -21,6 +21,7 @@ A caller submits the flat JSON payload below to `init_job` (Lambda, SNS, or dire
 | `commands_b64` | Required. Base64-encoded JSON array of shell commands. |
 | `done_endpoint` | Required. S3 URI where the result marker is written. |
 | `execution_target` | Required. One of `lambda` or `codebuild`. |
+| `timeout_seconds` | Required. Positive integer: the execution's overall timeout in seconds. No default; a missing or invalid value fails validation. |
 
 Here, `sops_type="ssm"` means that the SOPS age key is stored in AWS Systems Manager Parameter Store. It is independent of the removed SSM execution target.
 
@@ -39,8 +40,12 @@ Acknowledgement on dispatch:
 
 - `lambda`: asynchronous invocation of `AWS_EXE_SYS_WORKER_LAMBDA`.
 - `codebuild`: asynchronous start of the Standard workflow in `AWS_EXE_SYS_CODEBUILD_STATE_MACHINE_ARN`.
-  The workflow starts the managed CodeBuild project with all seven fields as plain-string CodeBuild
-  environment overrides, waits for a terminal build state, and invokes the finalizer.
+  The workflow starts the managed CodeBuild project with all eight fields as plain-string CodeBuild
+  environment overrides, waits for a terminal build state, and invokes the finalizer. The dispatcher derives
+  two numeric workflow inputs from `timeout_seconds`: the per-build CodeBuild `TimeoutInMinutesOverride`
+  (ceil to minutes plus a small margin) and the Step Functions state timeout (`timeout_seconds` plus the
+  queued bound and a provisioning margin). The CodeBuild project's static `build_timeout` is only a generous
+  ceiling the per-build override stays under.
 
 The payload is passed as plain string values to each target. Successful `init_job` acknowledgement for
 CodeBuild means Step Functions accepted the execution; it does not mean the build completed.

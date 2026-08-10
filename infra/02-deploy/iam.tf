@@ -210,6 +210,9 @@ resource "aws_iam_role_policy" "codebuild" {
         Resource = concat(
           ["${aws_s3_bucket.done.arn}/*"],
           [for arn in var.additional_result_bucket_arns : "${arn}/*"],
+          # S3 build logs (codebuild.tf logs_config) - grant only the exact
+          # codebuild/logs/ prefix when a log bucket is configured.
+          var.s3_log_bucket_name != "" ? ["arn:aws:s3:::${var.s3_log_bucket_name}/codebuild/logs/*"] : [],
         )
       },
       {

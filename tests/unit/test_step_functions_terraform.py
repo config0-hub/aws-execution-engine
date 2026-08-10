@@ -15,7 +15,7 @@ def test_state_machine_uses_standard_sync_codebuild_and_finalizer():
     assert "IfNoneMatch" not in source
 
 
-def test_state_machine_passes_exactly_seven_plaintext_environment_overrides():
+def test_state_machine_passes_exactly_eight_plaintext_environment_overrides():
     source = STATE_MACHINE_TERRAFORM.read_text()
 
     expected_names = {
@@ -26,7 +26,18 @@ def test_state_machine_passes_exactly_seven_plaintext_environment_overrides():
         "COMMANDS_B64",
         "DONE_ENDPOINT",
         "EXECUTION_TARGET",
+        "TIMEOUT_SECONDS",
     }
     for name in expected_names:
         assert source.count(f'Name      = "{name}"') == 1
-    assert source.count('Type      = "PLAINTEXT"') == 7
+    assert source.count('Type      = "PLAINTEXT"') == 8
+
+
+def test_state_machine_timeouts_derive_from_timeout_seconds():
+    source = STATE_MACHINE_TERRAFORM.read_text()
+
+    # The state timeout and the per-build CodeBuild override both follow the
+    # dispatcher-computed deadline inputs, not static constants.
+    assert 'TimeoutSecondsPath = "$.sfn_timeout_seconds"' in source
+    assert '"TimeoutInMinutesOverride.$" = "$.build_timeout_minutes"' in source
+    assert "TimeoutSeconds = 1200" not in source

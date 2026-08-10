@@ -31,6 +31,7 @@ def _valid_payload(**overrides) -> SimplePayload:
         "commands_b64": _b64_cmds(["echo hello"]),
         "done_endpoint": "s3://done-bucket/trg-001/result.json",
         "execution_target": "lambda",
+        "timeout_seconds": 3600,
     }
     defaults.update(overrides)
     return SimplePayload(**defaults)
