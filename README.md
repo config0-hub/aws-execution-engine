@@ -77,6 +77,8 @@ bash scripts/build-release-zip.sh
 It produces `dist/engine.zip` and `dist/sops-age-layer.zip`. The existing
 `scripts/build-zip.sh` is reserved for compatibility with the private release system.
 
+`docker/Dockerfile` builds the same runtime as a single image, published by `.github/workflows/image.yml` to `ghcr.io/config0-hub/aws-execution-engine`.
+
 ## Development
 
 Run tests with Docker:
