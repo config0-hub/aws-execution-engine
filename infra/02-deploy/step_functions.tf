@@ -116,6 +116,16 @@ resource "aws_sfn_state_machine" "codebuild" {
               "Value.$" = "$.timeout_seconds"
               Type      = "PLAINTEXT"
             },
+            {
+              Name      = "CALLBACK_URL"
+              "Value.$" = "$.callback_url"
+              Type      = "PLAINTEXT"
+            },
+            {
+              Name      = "CALLBACK_TOKEN"
+              "Value.$" = "$.callback_token"
+              Type      = "PLAINTEXT"
+            },
           ]
         }
         ResultSelector = {

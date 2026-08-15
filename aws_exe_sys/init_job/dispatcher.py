@@ -21,6 +21,8 @@ _PAYLOAD_FIELDS = (
     "done_endpoint",
     "execution_target",
     "timeout_seconds",
+    "callback_url",
+    "callback_token",
 )
 
 # Margin added on top of timeout_seconds for the per-build CodeBuild override
@@ -40,7 +42,7 @@ def _payload_to_dict(payload: SimplePayload) -> dict[str, str]:
 
 
 def dispatch_to_lambda(payload: SimplePayload) -> dict:
-    """Invoke the worker Lambda with all 8 payload fields."""
+    """Invoke the worker Lambda with all 10 payload fields."""
     function_name = os.environ["AWS_EXE_SYS_WORKER_LAMBDA"]
     client = boto3.client("lambda")
 
@@ -62,7 +64,7 @@ def dispatch_to_codebuild(payload: SimplePayload) -> dict:
     client = boto3.client("stepfunctions")
     execution_name = f"aws-exe-{uuid.uuid4().hex}"
 
-    # The 8 payload fields ride as strings (CodeBuild env transport). The two
+    # The 10 payload fields ride as strings (CodeBuild env transport). The two
     # derived numeric fields are computed here because the state machine's
     # JSONPath cannot do arithmetic: the per-build CodeBuild timeout override
     # and the Step Functions state timeout both follow timeout_seconds.

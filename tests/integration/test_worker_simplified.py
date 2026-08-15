@@ -16,6 +16,7 @@ import base64
 import json
 import shutil
 from unittest.mock import MagicMock, patch
+import urllib.error
 import zipfile
 
 import pytest
@@ -28,7 +29,7 @@ def _b64_cmds(cmds: list[str]) -> str:
 
 
 def _valid_event(**overrides) -> dict:
-    """Build a valid direct-invoke event dict with all 8 fields."""
+    """Build a valid direct-invoke event dict with the 8 required fields."""
     defaults = {
         "trigger_id": "trg-wkr-001",
         "s3_package_uri": "s3://test-bucket/exec/trg-wkr-001/exec.zip",
@@ -128,6 +129,72 @@ class TestWorkerHappyPath:
         body = json.loads(put_kwargs["Body"].decode())
         assert len(body["steps"]) == 3
         assert all(s["status"] == "succeeded" for s in body["steps"])
+
+
+class TestWorkerCallback:
+    """callback_url / callback_token end-to-end: event -> SimplePayload -> run() -> POST."""
+
+    def test_callback_posted_with_bearer_token_after_marker_write(self, code_zip):
+        mock_s3 = MagicMock()
+        mock_s3.download_file.side_effect = _mock_s3_download(code_zip)
+        mock_s3.put_object.return_value = {}
+
+        with (
+            patch("boto3.client", side_effect=_make_boto3_dispatcher({"s3": mock_s3})),
+            patch("aws_exe_sys.common.callback.urllib.request.urlopen") as mock_urlopen,
+        ):
+            result = handler(_valid_event(
+                commands_b64=_b64_cmds(["echo integration-test-output"]),
+                callback_url="https://caller.example.com/hooks/done",
+                callback_token="tok-abc",
+            ))
+
+        assert result["status"] == "succeeded"
+        mock_s3.put_object.assert_called_once()
+        mock_urlopen.assert_called_once()
+        request = mock_urlopen.call_args[0][0]
+        assert request.full_url == "https://caller.example.com/hooks/done"
+        assert request.get_header("Authorization") == "Bearer tok-abc"
+
+        marker_body = json.loads(mock_s3.put_object.call_args[1]["Body"].decode())
+        callback_body = json.loads(request.data.decode())
+        assert callback_body == marker_body
+
+    def test_absent_callback_url_no_post_attempted(self, code_zip):
+        mock_s3 = MagicMock()
+        mock_s3.download_file.side_effect = _mock_s3_download(code_zip)
+        mock_s3.put_object.return_value = {}
+
+        with (
+            patch("boto3.client", side_effect=_make_boto3_dispatcher({"s3": mock_s3})),
+            patch("aws_exe_sys.common.callback.urllib.request.urlopen") as mock_urlopen,
+        ):
+            result = handler(_valid_event(commands_b64=_b64_cmds(["echo no-callback"])))
+
+        assert result["status"] == "succeeded"
+        mock_urlopen.assert_not_called()
+
+    def test_callback_post_failure_does_not_affect_execution_result(self, code_zip):
+        mock_s3 = MagicMock()
+        mock_s3.download_file.side_effect = _mock_s3_download(code_zip)
+        mock_s3.put_object.return_value = {}
+
+        with (
+            patch("boto3.client", side_effect=_make_boto3_dispatcher({"s3": mock_s3})),
+            patch("aws_exe_sys.common.callback.urllib.request.urlopen") as mock_urlopen,
+        ):
+            mock_urlopen.side_effect = urllib.error.URLError("connection refused")
+
+            result = handler(_valid_event(
+                commands_b64=_b64_cmds(["echo callback-fails"]),
+                callback_url="https://caller.example.com/hooks/done",
+                callback_token="tok-abc",
+            ))
+
+        assert result["status"] == "succeeded"
+        mock_s3.put_object.assert_called_once()
+        marker_body = json.loads(mock_s3.put_object.call_args[1]["Body"].decode())
+        assert marker_body["status"] == "succeeded"
 
 
 class TestWorkerSopsSSMPath:

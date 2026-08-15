@@ -30,6 +30,11 @@ class SimplePayload:
         execution_target: One of "lambda" or "codebuild".
         timeout_seconds:  The execution's overall timeout in seconds. Required
                           and must be a positive integer - there is no default.
+        callback_url:     Optional. When set, the worker POSTs the terminal
+                          ExecutionResult here after writing the done-marker.
+                          Absent = today's behavior (no callback).
+        callback_token:   Optional. Sent as a bearer token on the callback
+                          POST. Requires callback_url to be set.
     """
 
     trigger_id: str
@@ -40,6 +45,8 @@ class SimplePayload:
     done_endpoint: str
     execution_target: str
     timeout_seconds: int
+    callback_url: str | None = None
+    callback_token: str | None = None
 
     @staticmethod
     def _coerce_null(value: object) -> str | None:
@@ -88,6 +95,8 @@ class SimplePayload:
             done_endpoint=data.get("done_endpoint", ""),
             execution_target=data.get("execution_target", ""),
             timeout_seconds=cls._coerce_int(data.get("timeout_seconds")),
+            callback_url=cls._coerce_null(data.get("callback_url")),
+            callback_token=cls._coerce_null(data.get("callback_token")),
         )
 
     def validate(self) -> None:
@@ -136,6 +145,12 @@ class SimplePayload:
             errors.append(
                 f"timeout_seconds must be a positive integer, got {self.timeout_seconds!r}"
             )
+
+        if self.callback_token is not None and self.callback_url is None:
+            errors.append("callback_url is required when callback_token is set")
+
+        if self.callback_url is not None and not self.callback_url.startswith(("http://", "https://")):
+            errors.append(f"callback_url must be an http(s) URL: {self.callback_url!r}")
 
         if errors:
             raise PayloadValidationError("; ".join(errors))

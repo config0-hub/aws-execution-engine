@@ -18,7 +18,7 @@ def _b64_cmds(cmds: list[str]) -> str:
 
 
 def _valid_event(**overrides) -> dict:
-    """Build a valid direct-invoke event dict with all 8 fields."""
+    """Build a valid direct-invoke event dict with the 8 required fields."""
     defaults = {
         "trigger_id": "trg-int-001",
         "s3_package_uri": "s3://test-bucket/exec/trg-int-001/exec.zip",
@@ -76,7 +76,9 @@ class TestInitValidPayloadDispatch:
         assert call_kwargs["InvocationType"] == "Event"
         sent = json.loads(call_kwargs["Payload"].decode())
         assert sent["trigger_id"] == "trg-int-001"
-        assert len(sent) == 8
+        assert len(sent) == 10
+        assert sent["callback_url"] == ""
+        assert sent["callback_token"] == ""
 
     def test_dispatch_to_codebuild(self, monkeypatch):
         state_machine_arn = "arn:aws:states:us-east-1:123:stateMachine:xe"
@@ -105,15 +107,19 @@ class TestInitValidPayloadDispatch:
         call_kwargs = mock_stepfunctions.start_execution.call_args.kwargs
         assert call_kwargs["stateMachineArn"] == state_machine_arn
         sent = json.loads(call_kwargs["input"])
-        # The SFN input is the 8 SimplePayload fields plus the two derived
+        # The SFN input is the 10 SimplePayload fields plus the two derived
         # timeout fields the state machine consumes.
         assert set(sent) == set(_valid_event()) | {
+            "callback_url",
+            "callback_token",
             "build_timeout_minutes",
             "sfn_timeout_seconds",
         }
         assert all(
             isinstance(sent[field], str) for field in _valid_event()
         )
+        assert sent["callback_url"] == ""
+        assert sent["callback_token"] == ""
         assert isinstance(sent["build_timeout_minutes"], int)
         assert isinstance(sent["sfn_timeout_seconds"], int)
         mock_stepfunctions.start_build.assert_not_called()

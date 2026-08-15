@@ -68,6 +68,8 @@ def handler(event: dict[str, Any], context: Any = None) -> dict:
             commands_b64=payload.commands_b64,
             done_endpoint=payload.done_endpoint,
             execution_target=payload.execution_target,
+            callback_url=payload.callback_url,
+            callback_token=payload.callback_token,
         )
         return {"status": status}
     except (PayloadValidationError, ValueError, KeyError, TypeError) as exc:
@@ -90,6 +92,8 @@ if __name__ == "__main__":
         done_endpoint=os.environ.get("DONE_ENDPOINT", ""),
         execution_target=os.environ.get("EXECUTION_TARGET", ""),
         timeout_seconds=SimplePayload._coerce_int(os.environ.get("TIMEOUT_SECONDS")),
+        callback_url=os.environ.get("CALLBACK_URL") or None,
+        callback_token=os.environ.get("CALLBACK_TOKEN") or None,
     )
     payload.validate()
     status = run(
@@ -100,5 +104,7 @@ if __name__ == "__main__":
         commands_b64=payload.commands_b64,
         done_endpoint=payload.done_endpoint,
         execution_target=payload.execution_target,
+        callback_url=payload.callback_url,
+        callback_token=payload.callback_token,
     )
     exit(0 if status == "succeeded" else 1)

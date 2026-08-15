@@ -499,6 +499,136 @@ class TestRunAlwaysWritesResult:
             )
 
 
+class TestRunCallback:
+    """callback_url / callback_token — best-effort POST after the marker write."""
+
+    @patch("aws_exe_sys.worker.run.post_callback")
+    @patch("aws_exe_sys.worker.run.write_result")
+    @patch("aws_exe_sys.worker.run.run_commands")
+    @patch("aws_exe_sys.worker.run.fetch_code_s3")
+    def test_absent_callback_url_no_post_attempted(
+        self,
+        mock_fetch,
+        mock_run_cmds,
+        mock_write,
+        mock_post_callback,
+    ):
+        mock_fetch.return_value = "/tmp/work"
+        mock_run_cmds.return_value = [
+            StepResult(step_name="step-0", status="succeeded", exit_code=0, duration_seconds=0.1, output="ok"),
+        ]
+
+        run(
+            trigger_id="t-no-cb",
+            s3_package_uri="s3://bucket/exec.zip",
+            sops_type=None,
+            sops_path=None,
+            commands_b64=_encode_commands(["echo ok"]),
+            done_endpoint=DONE_ENDPOINT,
+            execution_target="lambda",
+        )
+
+        mock_post_callback.assert_called_once_with(None, None, mock_write.call_args[0][1])
+
+    @patch("aws_exe_sys.worker.run.post_callback")
+    @patch("aws_exe_sys.worker.run.write_result")
+    @patch("aws_exe_sys.worker.run.run_commands")
+    @patch("aws_exe_sys.worker.run.fetch_code_s3")
+    def test_present_callback_posted_with_token_after_marker_write(
+        self,
+        mock_fetch,
+        mock_run_cmds,
+        mock_write,
+        mock_post_callback,
+    ):
+        mock_fetch.return_value = "/tmp/work"
+        mock_run_cmds.return_value = [
+            StepResult(step_name="step-0", status="succeeded", exit_code=0, duration_seconds=0.1, output="ok"),
+        ]
+        call_order = []
+        mock_write.side_effect = lambda *a, **k: call_order.append("write_result")
+        mock_post_callback.side_effect = lambda *a, **k: call_order.append("post_callback")
+
+        run(
+            trigger_id="t-cb",
+            s3_package_uri="s3://bucket/exec.zip",
+            sops_type=None,
+            sops_path=None,
+            commands_b64=_encode_commands(["echo ok"]),
+            done_endpoint=DONE_ENDPOINT,
+            execution_target="lambda",
+            callback_url="https://caller.example.com/hooks/done",
+            callback_token="tok-abc",
+        )
+
+        assert call_order == ["write_result", "post_callback"]
+        mock_post_callback.assert_called_once_with(
+            "https://caller.example.com/hooks/done",
+            "tok-abc",
+            mock_write.call_args[0][1],
+        )
+
+    @patch("aws_exe_sys.worker.run.post_callback")
+    @patch("aws_exe_sys.worker.run.write_result")
+    @patch("aws_exe_sys.worker.run.fetch_code_s3")
+    def test_callback_failure_does_not_affect_returned_status(
+        self,
+        mock_fetch,
+        mock_write,
+        mock_post_callback,
+    ):
+        """post_callback is a no-raise function — its own internals log-and-swallow
+        the failure, so run() never sees an exception from it. Even so, a mock
+        that raised would prove the failure never reaches the caller's status."""
+        mock_fetch.side_effect = Exception("boom")
+        mock_post_callback.return_value = None  # post_callback never raises by contract
+
+        status = run(
+            trigger_id="t-cb-fail",
+            s3_package_uri="s3://bucket/exec.zip",
+            sops_type=None,
+            sops_path=None,
+            commands_b64=_encode_commands(["echo never"]),
+            done_endpoint=DONE_ENDPOINT,
+            execution_target="lambda",
+            callback_url="https://caller.example.com/hooks/done",
+            callback_token="tok-abc",
+        )
+
+        assert status == "failed"
+        mock_post_callback.assert_called_once()
+
+    @patch("aws_exe_sys.worker.run.post_callback")
+    @patch("aws_exe_sys.worker.run.write_result")
+    @patch("aws_exe_sys.worker.run.fetch_code_s3")
+    def test_write_result_failure_skips_callback(
+        self,
+        mock_fetch,
+        mock_write,
+        mock_post_callback,
+    ):
+        """A marker-write failure is raised (not swallowed) and the callback
+        that follows it in the finally block never runs — the invariant is
+        callback-after-successful-write, not callback-no-matter-what."""
+        mock_fetch.side_effect = Exception("download failed")
+        mock_write.side_effect = OSError("S3 write failed")
+
+        with pytest.raises(OSError, match="S3 write failed"):
+            run(
+                trigger_id="t-write-fail-cb",
+                s3_package_uri="s3://bucket/exec.zip",
+                sops_type=None,
+                sops_path=None,
+                commands_b64=_encode_commands(["echo"]),
+                done_endpoint=DONE_ENDPOINT,
+                execution_target="lambda",
+                callback_url="https://caller.example.com/hooks/done",
+                callback_token="tok-abc",
+            )
+
+        mock_post_callback.assert_not_called()
+
+
 class TestRunNoEnvironMutation:
     """Verify run() does not mutate os.environ."""
 
