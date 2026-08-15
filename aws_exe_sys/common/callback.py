@@ -8,7 +8,6 @@ This is the one sanctioned best-effort seam (decided 2026-08-13).
 
 import json
 import logging
-import urllib.error
 import urllib.request
 
 from aws_exe_sys.common.result_writer import ExecutionResult
@@ -40,7 +39,14 @@ def post_callback(callback_url: str | None, callback_token: str | None, result: 
     try:
         with urllib.request.urlopen(request, timeout=_TIMEOUT_SECONDS):
             pass
-    except (urllib.error.URLError, OSError) as exc:
+    except Exception as exc:
+        # Best-effort seam (sanctioned, see module docstring + CONTRACT.md): the
+        # done-marker has already been written by the time this runs, so NOTHING
+        # raised while attempting the callback — network errors, HTTP errors,
+        # malformed callback_url (e.g. http.client.InvalidURL), timeouts, or any
+        # other failure mode — may propagate. Propagating here would fail an
+        # already-succeeded execution or trigger an async Lambda retry that
+        # re-executes commands. Log and swallow unconditionally.
         logger.warning(
             "Completion callback failed: trigger_id=%s callback_url=%s error=%s",
             result.trigger_id,

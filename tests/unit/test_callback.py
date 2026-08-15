@@ -1,5 +1,6 @@
 """Unit tests for aws_exe_sys/common/callback.py — best-effort completion callback."""
 
+import http.client
 import json
 from unittest.mock import patch
 import urllib.error
@@ -75,3 +76,22 @@ class TestPostCallbackFailureIsLogOnly:
         post_callback("https://caller.example.com/hooks/done", None, _RESULT)  # must not raise
 
         mock_logger.warning.assert_called_once()
+
+    @patch("aws_exe_sys.common.callback.logger")
+    @patch("aws_exe_sys.common.callback.urllib.request.urlopen")
+    def test_malformed_url_is_logged_and_swallowed(self, mock_urlopen, mock_logger):
+        # http.client.InvalidURL is not a URLError/OSError subclass — this is the
+        # exact escape the broad `except Exception` seam exists to close (a
+        # malformed callback_url must not fail the already-succeeded execution
+        # or trigger an async retry that re-executes commands).
+        mock_urlopen.side_effect = http.client.InvalidURL("URL can't contain control characters")
+
+        post_callback("https://caller.example.com/hooks/done", "tok-abc", _RESULT)  # must not raise
+
+        mock_logger.warning.assert_called_once()
+
+    def test_malformed_url_end_to_end_does_not_raise(self):
+        # No mocking of urlopen: a control character in the host makes the real
+        # http.client machinery raise http.client.InvalidURL. Proves the result
+        # is unaffected and nothing propagates out of post_callback.
+        post_callback("http://caller.example.com\x00/hooks/done", None, _RESULT)
