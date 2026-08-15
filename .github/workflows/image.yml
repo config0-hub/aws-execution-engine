@@ -1,0 +1,43 @@
+name: image
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/config0-hub/aws-execution-engine
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set image tag
+        id: tag
+        run: echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Build image
+        run: docker build -f docker/Dockerfile -t "$IMAGE:${{ steps.tag.outputs.sha }}" .
+
+      - name: Push short-SHA tag
+        run: docker push "$IMAGE:${{ steps.tag.outputs.sha }}"
+
+      - name: Tag and push latest
+        if: github.ref == 'refs/heads/main'
+        run: |
+          docker tag "$IMAGE:${{ steps.tag.outputs.sha }}" "$IMAGE:latest"
+          docker push "$IMAGE:latest"
