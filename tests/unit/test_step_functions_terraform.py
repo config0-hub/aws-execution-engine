@@ -15,7 +15,7 @@ def test_state_machine_uses_standard_sync_codebuild_and_finalizer():
     assert "IfNoneMatch" not in source
 
 
-def test_state_machine_passes_exactly_eight_plaintext_environment_overrides():
+def test_state_machine_passes_exactly_ten_plaintext_environment_overrides():
     source = STATE_MACHINE_TERRAFORM.read_text()
 
     expected_names = {
@@ -27,10 +27,12 @@ def test_state_machine_passes_exactly_eight_plaintext_environment_overrides():
         "DONE_ENDPOINT",
         "EXECUTION_TARGET",
         "TIMEOUT_SECONDS",
+        "CALLBACK_URL",
+        "CALLBACK_TOKEN",
     }
     for name in expected_names:
         assert source.count(f'Name      = "{name}"') == 1
-    assert source.count('Type      = "PLAINTEXT"') == 8
+    assert source.count('Type      = "PLAINTEXT"') == 10
 
 
 def test_state_machine_timeouts_derive_from_timeout_seconds():

@@ -214,6 +214,50 @@ class TestSimplePayloadInvalidExecutionTarget:
             p.validate()
 
 
+class TestSimplePayloadCallbackFields:
+    """callback_url / callback_token — optional, backward-compatible fields."""
+
+    def test_absent_by_default(self):
+        p = _valid_payload()
+        p.validate()
+        assert p.callback_url is None
+        assert p.callback_token is None
+
+    def test_valid_url_and_token(self):
+        p = _valid_payload(callback_url="https://caller.example.com/hooks/done", callback_token="tok-abc")
+        p.validate()
+
+    def test_valid_url_no_token(self):
+        p = _valid_payload(callback_url="https://caller.example.com/hooks/done")
+        p.validate()
+
+    def test_token_without_url_is_invalid(self):
+        p = _valid_payload(callback_token="tok-abc")
+        with pytest.raises(PayloadValidationError, match="callback_url"):
+            p.validate()
+
+    def test_non_http_url_is_invalid(self):
+        p = _valid_payload(callback_url="s3://bucket/key")
+        with pytest.raises(PayloadValidationError, match="callback_url"):
+            p.validate()
+
+    def test_from_dict_missing_keys_default_to_none(self):
+        p = SimplePayload.from_dict({})
+        assert p.callback_url is None
+        assert p.callback_token is None
+
+    def test_from_dict_empty_string_becomes_none(self):
+        p = SimplePayload.from_dict(_dict_with(callback_url="", callback_token=""))
+        assert p.callback_url is None
+        assert p.callback_token is None
+        p.validate()
+
+    def test_from_dict_real_values_preserved(self):
+        p = SimplePayload.from_dict(_dict_with(callback_url="https://x.example.com/cb", callback_token="secret"))
+        assert p.callback_url == "https://x.example.com/cb"
+        assert p.callback_token == "secret"
+
+
 class TestSimplePayloadDecodeCommands:
     def test_decode(self):
         cmds = ["echo 1", "echo 2"]

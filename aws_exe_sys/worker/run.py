@@ -14,6 +14,7 @@ import tempfile
 import time
 import zipfile
 
+from aws_exe_sys.common.callback import post_callback
 from aws_exe_sys.common.result_writer import ExecutionResult, write_result
 from aws_exe_sys.common.sops import SopsKeyExpired, handle_sops
 from aws_exe_sys.common.subprocess_runner import run_commands
@@ -68,6 +69,8 @@ def run(
     commands_b64: str,
     done_endpoint: str,
     execution_target: str,
+    callback_url: str | None = None,
+    callback_token: str | None = None,
 ) -> str:
     """Single worker entrypoint.
 
@@ -79,6 +82,7 @@ def run(
         5. run_commands with enriched env
         6. Build ExecutionResult
         7. ALWAYS write_result to done_endpoint (even on failure)
+        8. If callback_url is set, best-effort POST the result (log-only on failure)
 
     Returns the final status string ("succeeded" or "failed").
     """
@@ -162,5 +166,9 @@ def run(
         # A missing marker is indistinguishable from a running job to callers.
         # Do not report success when the terminal result could not be persisted.
         write_result(done_endpoint, result)
+
+        # Best-effort completion callback, only after the marker write above
+        # has succeeded. No-op when callback_url is absent.
+        post_callback(callback_url, callback_token, result)
 
     return result.status

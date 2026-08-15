@@ -12,8 +12,9 @@ This repository implements a minimal, provider-agnostic executor.
   - decrypts optional secrets (`sops_type`)
   - runs the command list from `commands_b64`
   - writes the detailed terminal `ExecutionResult` to `done_endpoint`
+  - if `callback_url` is set, best-effort POSTs the result there after the write (log-only on failure)
 - **CodeBuild workflow** (Standard Step Functions):
-  - starts CodeBuild with all eight payload fields as plaintext environment overrides
+  - starts CodeBuild with all ten payload fields as plaintext environment overrides
   - waits for CodeBuild to reach a terminal state
   - invokes the finalizer on both success and caught failure
 - **`finalizer`** (`aws_exe_sys.finalizer`):
