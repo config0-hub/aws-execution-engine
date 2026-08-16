@@ -54,6 +54,9 @@ Acknowledgement on dispatch:
 
 - `lambda`: asynchronous invocation of `AWS_EXE_SYS_WORKER_LAMBDA`.
 - `codebuild`: asynchronous start of the Standard workflow in `AWS_EXE_SYS_CODEBUILD_STATE_MACHINE_ARN`.
+  The workflow first normalizes its input, merging empty-string defaults for any of the ten payload
+  fields missing from the execution input, so a malformed dispatch still reaches the finalizer and
+  writes a terminal result instead of failing untemplatable.
   The workflow starts the managed CodeBuild project with all ten fields as plain-string CodeBuild
   environment overrides, waits for a terminal build state, and invokes the finalizer. The dispatcher derives
   two numeric workflow inputs from `timeout_seconds`: the per-build CodeBuild `TimeoutInMinutesOverride`

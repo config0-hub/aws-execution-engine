@@ -49,6 +49,27 @@ resource "aws_iam_role_policy" "codebuild_workflow" {
   })
 }
 
+locals {
+  # Every SimplePayload field the RunCodeBuild task state references by
+  # JSONPath. A missing key in the execution input makes that reference throw
+  # States.Runtime, which is uncatchable (a Catch on States.ALL does NOT catch
+  # it), so FinalizeResult would never run and no done-marker would be written.
+  # NormalizePayload merges these empty-string defaults under the execution
+  # input so every referenced key always exists.
+  codebuild_payload_defaults = {
+    trigger_id       = ""
+    s3_package_uri   = ""
+    sops_type        = ""
+    sops_path        = ""
+    commands_b64     = ""
+    done_endpoint    = ""
+    execution_target = ""
+    timeout_seconds  = ""
+    callback_url     = ""
+    callback_token   = ""
+  }
+}
+
 resource "aws_sfn_state_machine" "codebuild" {
   name     = "${local.prefix}-codebuild"
   role_arn = aws_iam_role.codebuild_workflow.arn
@@ -56,8 +77,23 @@ resource "aws_sfn_state_machine" "codebuild" {
 
   definition = jsonencode({
     Comment = "Run the execution-engine CodeBuild worker and guarantee a terminal S3 result"
-    StartAt = "RunCodeBuild"
+    StartAt = "NormalizePayload"
     States = {
+      NormalizePayload = {
+        Type = "Pass"
+        # Defaults-normalization: shallow-merge empty-string defaults for all
+        # ten payload keys UNDER the execution input (input wins), so every
+        # JSONPath the RunCodeBuild task references always resolves and
+        # uncatchable States.Runtime templating failures cannot occur. The
+        # defaults do NOT mask real requirements: an empty trigger_id /
+        # done_endpoint etc. makes the worker fail loudly inside the container
+        # and write its failed marker - the correct fail-loud path.
+        Parameters = {
+          "merged.$" = "States.JsonMerge(States.StringToJson('${jsonencode(local.codebuild_payload_defaults)}'), $$.Execution.Input, false)"
+        }
+        OutputPath = "$.merged"
+        Next       = "RunCodeBuild"
+      }
       RunCodeBuild = {
         Type     = "Task"
         Resource = "arn:${data.aws_partition.current.partition}:states:::codebuild:startBuild.sync"

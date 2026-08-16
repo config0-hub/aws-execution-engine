@@ -35,6 +35,36 @@ def test_state_machine_passes_exactly_ten_plaintext_environment_overrides():
     assert source.count('Type      = "PLAINTEXT"') == 10
 
 
+def test_state_machine_normalizes_missing_payload_keys_before_codebuild():
+    source = STATE_MACHINE_TERRAFORM.read_text()
+
+    # A missing input key makes a field-level JSONPath reference throw
+    # States.Runtime, which Catch cannot intercept; the NormalizePayload Pass
+    # state must merge defaults for all ten payload keys before the task runs.
+    assert 'StartAt = "NormalizePayload"' in source
+    assert "States.JsonMerge(States.StringToJson(" in source
+    assert "$$.Execution.Input, false)" in source
+    assert 'Next       = "RunCodeBuild"' in source
+
+    expected_default_keys = {
+        "trigger_id",
+        "s3_package_uri",
+        "sops_type",
+        "sops_path",
+        "commands_b64",
+        "done_endpoint",
+        "execution_target",
+        "timeout_seconds",
+        "callback_url",
+        "callback_token",
+    }
+    defaults_block = source.split("codebuild_payload_defaults = {")[1].split("}")[0]
+    for key in expected_default_keys:
+        assert f'{key}' in defaults_block, f"missing default for {key}"
+        # Every task-referenced JSONPath has a matching normalized default.
+        assert f'"$.{key}"' in source
+
+
 def test_state_machine_timeouts_derive_from_timeout_seconds():
     source = STATE_MACHINE_TERRAFORM.read_text()
 
