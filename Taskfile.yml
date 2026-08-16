@@ -31,5 +31,21 @@ tasks:
     cmds:
       - tofu -chdir=infra/00-bootstrap init -backend=false -input=false > /dev/null
       - tofu -chdir=infra/00-bootstrap validate
+      - tofu -chdir=infra/01-ecr init -backend=false -input=false > /dev/null
+      - tofu -chdir=infra/01-ecr validate
       - tofu -chdir=infra/02-deploy init -backend=false -input=false > /dev/null
       - tofu -chdir=infra/02-deploy validate
+
+  ecr:apply:
+    desc: Create/update the tenant ECR repository (infra/01-ecr).
+    cmds:
+      - tofu -chdir=infra/01-ecr init
+      - tofu -chdir=infra/01-ecr apply -auto-approve
+
+  ecr:mirror:
+    desc: >-
+      Mirror the public GHCR image into the tenant ECR repo (infra/01-ecr
+      must already be applied). Pass an optional tag after `--`; defaults to
+      the current checkout's short SHA.
+    cmds:
+      - bash scripts/mirror-image.sh {{.CLI_ARGS}}

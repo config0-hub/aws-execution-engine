@@ -39,13 +39,19 @@ variable "engine_zip_s3_bucket" {
 }
 
 variable "engine_zip_s3_key" {
-  description = "S3 key for engine.zip (aws_exe_sys/ source + pip deps). Used by init_job + worker Lambdas AND by CodeBuild."
+  description = "S3 key for engine.zip (aws_exe_sys/ source + pip deps). Used by the init_job + worker Lambdas; CodeBuild runs the engine ECR image instead."
   type        = string
 }
 
 variable "sops_age_layer_s3_key" {
   description = "S3 key for sops-age-layer.zip. Attached to worker Lambda only."
   type        = string
+}
+
+variable "engine_ecr_repository_name" {
+  description = "Name of the tenant ECR repository holding the engine image (created by infra/01-ecr). CodeBuild runs its :latest tag."
+  type        = string
+  default     = "aws-execution-engine"
 }
 
 variable "additional_package_bucket_arns" {

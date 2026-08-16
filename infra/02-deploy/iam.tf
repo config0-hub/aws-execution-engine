@@ -192,9 +192,20 @@ resource "aws_iam_role_policy" "codebuild" {
     Version = "2012-10-17"
     Statement = [
       {
+        # ECR auth is account-scoped by AWS; pull actions stay scoped to the
+        # engine repo. Needed for image_pull_credentials_type = SERVICE_ROLE.
         Effect   = "Allow"
-        Action   = ["s3:GetObject"]
-        Resource = "arn:aws:s3:::${var.engine_zip_s3_bucket}/*"
+        Action   = ["ecr:GetAuthorizationToken"]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ecr:BatchGetImage",
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:BatchCheckLayerAvailability",
+        ]
+        Resource = data.aws_ecr_repository.engine.arn
       },
       {
         Effect = "Allow"

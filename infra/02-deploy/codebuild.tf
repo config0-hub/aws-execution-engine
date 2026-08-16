@@ -1,3 +1,20 @@
+# The engine's own image, mirrored into the tenant ECR repo by
+# infra/01-ecr + scripts/mirror-image.sh. It bakes the engine code at
+# /opt/engine (ENGINE_TASK_ROOT) with tofu/sops/age on PATH - docker/Dockerfile.
+data "aws_ecr_repository" "engine" {
+  name = var.engine_ecr_repository_name
+}
+
+# Existence gate, not a pin: CodeBuild still runs `:latest` (see `image`
+# below). Without this, `tofu plan/apply` plans green against an empty repo
+# and every build then fails at PROVISIONING. This forces a fail-loud error
+# here instead, when no image has been mirrored yet (infra/01-ecr +
+# scripts/mirror-image.sh).
+data "aws_ecr_image" "engine_latest" {
+  repository_name = data.aws_ecr_repository.engine.name
+  image_tag       = "latest"
+}
+
 resource "aws_codebuild_project" "worker" {
   name         = "${local.prefix}-worker"
   service_role = aws_iam_role.codebuild.arn
@@ -32,11 +49,13 @@ resource "aws_codebuild_project" "worker" {
   }
 
   environment {
-    compute_type                = local.codebuild_compute
-    image                       = "aws/codebuild/standard:7.0"
-    type                        = "LINUX_CONTAINER"
-    privileged_mode             = true
-    image_pull_credentials_type = "CODEBUILD"
+    compute_type = local.codebuild_compute
+    image        = "${data.aws_ecr_repository.engine.repository_url}:latest"
+    type         = "LINUX_CONTAINER"
+    # privileged_mode off: nothing in the engine execution path runs docker
+    # (docker appears in this repo only for local image build/test/mirror).
+    privileged_mode             = false
+    image_pull_credentials_type = "SERVICE_ROLE"
 
     environment_variable {
       name  = "AWS_EXE_SYS_INTERNAL_BUCKET"
@@ -47,26 +66,6 @@ resource "aws_codebuild_project" "worker" {
       name  = "AWS_EXE_SYS_DONE_BUCKET"
       value = aws_s3_bucket.done.id
     }
-
-    environment_variable {
-      name  = "ENGINE_ZIP_S3_BUCKET"
-      value = var.engine_zip_s3_bucket
-    }
-
-    environment_variable {
-      name  = "ENGINE_ZIP_S3_KEY"
-      value = var.engine_zip_s3_key
-    }
-
-    environment_variable {
-      name  = "SOPS_URL"
-      value = "https://github.com/getsops/sops/releases/download/v3.9.4/sops-v3.9.4.linux.amd64"
-    }
-
-    environment_variable {
-      name  = "AGE_URL"
-      value = "https://dl.filippo.io/age/v1.2.1?for=linux/amd64"
-    }
   }
 
   source {
@@ -74,15 +73,20 @@ resource "aws_codebuild_project" "worker" {
     buildspec = <<-BUILDSPEC
       version: 0.2
       phases:
-        install:
-          commands:
-            - curl -fsSL "$SOPS_URL" -o /usr/local/bin/sops && chmod +x /usr/local/bin/sops
-            - curl -fsSL "$AGE_URL" | tar xz --strip-components=1 -C /usr/local/bin age/age age/age-keygen
         build:
           commands:
-            - aws s3 cp "s3://$ENGINE_ZIP_S3_BUCKET/$ENGINE_ZIP_S3_KEY" /tmp/engine.zip
-            - mkdir -p /work && unzip -q /tmp/engine.zip -d /work
-            - ENGINE_TASK_ROOT=/work bash /work/aws_exe_sys/worker/entrypoint.sh
+            - ENGINE_TASK_ROOT=/opt/engine bash /opt/engine/aws_exe_sys/worker/entrypoint.sh
     BUILDSPEC
+  }
+
+  # Forces data.aws_ecr_image.engine_latest into the plan/apply graph (an
+  # unreferenced data source is otherwise dead weight) so a missing :latest
+  # image fails loud here, at plan time, instead of the every-build
+  # PROVISIONING failure this replaces.
+  lifecycle {
+    precondition {
+      condition     = data.aws_ecr_image.engine_latest.id != ""
+      error_message = "No :latest image in the ${var.engine_ecr_repository_name} ECR repo - run scripts/mirror-image.sh (or task ecr:mirror) before applying infra/02-deploy."
+    }
   }
 }

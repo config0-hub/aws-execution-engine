@@ -5,6 +5,7 @@ The repo includes Terraform in `infra/` for deploying the generic engine API.
 ## Directory layout
 
 - `infra/00-bootstrap`: S3 state backend bucket.
+- `infra/01-ecr`: tenant ECR repository that mirrors the published `ghcr.io/config0-hub/aws-execution-engine` image.
 - `infra/02-deploy`: Lambda, API Gateway, S3, IAM, CodeBuild, and Step Functions resources.
 
 ## Minimal local flow
@@ -23,7 +24,15 @@ The repo includes Terraform in `infra/` for deploying the generic engine API.
    - `engine_zip_s3_bucket`
    - `engine_zip_s3_key`
    - `sops_age_layer_s3_key`
-3. Generate Terraform vars and deploy:
+3. Create the ECR repo and mirror the engine image (required before `02-deploy` - its plan
+   fails loud when no `latest` image exists in the `aws-execution-engine` ECR repo):
+
+   ```bash
+   task ecr:apply
+   task ecr:mirror
+   ```
+
+4. Generate Terraform vars and deploy:
 
 ```bash
 cd infra/02-deploy
@@ -44,6 +53,8 @@ terraform apply
 
 By default, deployed roles read packages from `<project_prefix>-internal` and write results to
 `<project_prefix>-done`. Configure the additional bucket ARN lists when payloads use other buckets.
+
+Create the tenant ECR repo (`task ecr:apply`) and mirror the published image into it (`task ecr:mirror`) before a CodeBuild execution target that consumes the image from this account.
 
 ## CodeBuild orchestration
 
