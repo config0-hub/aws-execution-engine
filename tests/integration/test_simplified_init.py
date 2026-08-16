@@ -76,9 +76,10 @@ class TestInitValidPayloadDispatch:
         assert call_kwargs["InvocationType"] == "Event"
         sent = json.loads(call_kwargs["Payload"].decode())
         assert sent["trigger_id"] == "trg-int-001"
-        assert len(sent) == 10
+        assert len(sent) == 11
         assert sent["callback_url"] == ""
         assert sent["callback_token"] == ""
+        assert sent["execution_mode"] == ""
 
     def test_dispatch_to_codebuild(self, monkeypatch):
         state_machine_arn = "arn:aws:states:us-east-1:123:stateMachine:xe"
