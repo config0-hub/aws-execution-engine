@@ -90,3 +90,37 @@ resource "aws_codebuild_project" "worker" {
     }
   }
 }
+
+# --- Direct-mode static buildspec (execution_mode = "direct") ---
+#
+# Dispatcher-owned, byte-identical for every direct build. Referenced ONLY by
+# the RunCodeBuildDirect Task state's BuildspecOverride Parameter in
+# step_functions.tf - never wired into the project resource's own
+# source.buildspec above. It reinstates the pre-c013a7b delivery path: install
+# pinned sops/age, pull engine.zip from S3, run entrypoint.sh. The four env
+# vars it reads (ENGINE_ZIP_S3_BUCKET / ENGINE_ZIP_S3_KEY / SOPS_URL /
+# AGE_URL) are injected at StartBuild time by RunCodeBuildDirect's own
+# EnvironmentVariablesOverride entries only - never as project-level
+# environment_variable blocks. It never references s3_package_uri: that URI
+# stays a payload env override the worker fetches itself via fetch_code_s3;
+# this buildspec's only job is to make entrypoint.sh exist on disk and run it.
+locals {
+  direct_mode_buildspec = <<-BUILDSPEC
+    version: 0.2
+    phases:
+      install:
+        commands:
+          - curl -fsSL "$SOPS_URL" -o /usr/local/bin/sops && chmod +x /usr/local/bin/sops
+          - curl -fsSL "$AGE_URL" | tar xz --strip-components=1 -C /usr/local/bin age/age age/age-keygen
+      build:
+        commands:
+          - aws s3 cp "s3://$ENGINE_ZIP_S3_BUCKET/$ENGINE_ZIP_S3_KEY" /tmp/engine.zip
+          - mkdir -p /work && unzip -q /tmp/engine.zip -d /work
+          - ENGINE_TASK_ROOT=/work bash /work/aws_exe_sys/worker/entrypoint.sh
+  BUILDSPEC
+
+  # Pinned tool URLs for the direct-mode install phase - the exact values
+  # c013a7b removed, restored only on RunCodeBuildDirect's overrides.
+  direct_mode_sops_url = "https://github.com/getsops/sops/releases/download/v3.9.4/sops-v3.9.4.linux.amd64"
+  direct_mode_age_url  = "https://dl.filippo.io/age/v1.2.1?for=linux/amd64"
+}

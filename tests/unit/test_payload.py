@@ -263,3 +263,41 @@ class TestSimplePayloadDecodeCommands:
         cmds = ["echo 1", "echo 2"]
         p = _valid_payload(commands_b64=_b64_cmds(cmds))
         assert p.decode_commands() == cmds
+
+
+class TestExecutionMode:
+    """execution_mode (11th field, wire contract v5.1) - dispatch-only discriminator."""
+
+    def test_absent_by_default(self):
+        p = _valid_payload()
+        assert p.execution_mode is None
+        p.validate()
+
+    def test_none_valid_for_both_targets(self):
+        for target in ("lambda", "codebuild"):
+            p = _valid_payload(execution_target=target, execution_mode=None)
+            p.validate()
+
+    def test_direct_with_codebuild_passes(self):
+        p = _valid_payload(execution_target="codebuild", execution_mode="direct")
+        p.validate()
+
+    def test_direct_with_lambda_rejected(self):
+        p = _valid_payload(execution_target="lambda", execution_mode="direct")
+        with pytest.raises(PayloadValidationError, match="execution_mode 'direct' requires execution_target 'codebuild'"):
+            p.validate()
+
+    def test_non_direct_value_rejected(self):
+        for bad in ("DIRECT", "Direct", "engine-image", "true", "1"):
+            p = _valid_payload(execution_target="codebuild", execution_mode=bad)
+            with pytest.raises(PayloadValidationError, match="execution_mode must be 'direct' or None"):
+                p.validate()
+
+    def test_from_dict_coerces_null_placeholders(self):
+        for placeholder in ("", "null", "none", None):
+            p = SimplePayload.from_dict({"execution_mode": placeholder})
+            assert p.execution_mode is None
+
+    def test_from_dict_preserves_direct(self):
+        p = SimplePayload.from_dict({"execution_mode": "direct"})
+        assert p.execution_mode == "direct"

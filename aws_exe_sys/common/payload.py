@@ -35,6 +35,13 @@ class SimplePayload:
                           Absent = today's behavior (no callback).
         callback_token:   Optional. Sent as a bearer token on the callback
                           POST. Requires callback_url to be set.
+        execution_mode:   Optional. None (absent) = engine-image mode (the
+                          default). "direct" = the CodeBuild delivery runs the
+                          static dispatcher-owned buildspec on
+                          aws/codebuild/standard:7.0 privileged instead of the
+                          engine ECR image. Dispatch-only discriminator: the
+                          Step Functions Choice state reads it; the worker
+                          never does. Requires execution_target "codebuild".
     """
 
     trigger_id: str
@@ -47,6 +54,7 @@ class SimplePayload:
     timeout_seconds: int
     callback_url: str | None = None
     callback_token: str | None = None
+    execution_mode: str | None = None
 
     @staticmethod
     def _coerce_null(value: object) -> str | None:
@@ -97,6 +105,7 @@ class SimplePayload:
             timeout_seconds=cls._coerce_int(data.get("timeout_seconds")),
             callback_url=cls._coerce_null(data.get("callback_url")),
             callback_token=cls._coerce_null(data.get("callback_token")),
+            execution_mode=cls._coerce_null(data.get("execution_mode")),
         )
 
     def validate(self) -> None:
@@ -151,6 +160,17 @@ class SimplePayload:
 
         if self.callback_url is not None and not self.callback_url.startswith(("http://", "https://")):
             errors.append(f"callback_url must be an http(s) URL: {self.callback_url!r}")
+
+        if self.execution_mode is not None and self.execution_mode != "direct":
+            errors.append(
+                f"execution_mode must be 'direct' or None, got {self.execution_mode!r}"
+            )
+
+        if self.execution_mode == "direct" and self.execution_target != "codebuild":
+            errors.append(
+                "execution_mode 'direct' requires execution_target 'codebuild', "
+                f"got execution_target {self.execution_target!r}"
+            )
 
         if errors:
             raise PayloadValidationError("; ".join(errors))

@@ -35,7 +35,7 @@ def _valid_payload(**overrides) -> SimplePayload:
 
 
 class TestPayloadToDict:
-    def test_all_10_fields_present(self):
+    def test_all_11_fields_present(self):
         payload = _valid_payload()
         d = _payload_to_dict(payload)
         assert set(d.keys()) == {
@@ -49,6 +49,7 @@ class TestPayloadToDict:
             "timeout_seconds",
             "callback_url",
             "callback_token",
+            "execution_mode",
         }
         assert d["trigger_id"] == "trg-001"
         assert d["timeout_seconds"] == "3600"
@@ -65,6 +66,16 @@ class TestPayloadToDict:
         d = _payload_to_dict(payload)
         assert d["callback_url"] == ""
         assert d["callback_token"] == ""
+
+    def test_absent_execution_mode_becomes_empty_string(self):
+        payload = _valid_payload()
+        d = _payload_to_dict(payload)
+        assert d["execution_mode"] == ""
+
+    def test_execution_mode_direct_rides_as_plain_string(self):
+        payload = _valid_payload(execution_target="codebuild", execution_mode="direct")
+        d = _payload_to_dict(payload)
+        assert d["execution_mode"] == "direct"
 
     def test_callback_fields_present(self):
         payload = _valid_payload(
@@ -93,7 +104,7 @@ class TestDispatchToLambda:
         mock_client.invoke.assert_called_once()
 
     @patch("aws_exe_sys.init_job.dispatcher.boto3")
-    def test_passes_all_10_fields_in_payload(self, mock_boto3, monkeypatch):
+    def test_passes_all_11_fields_in_payload(self, mock_boto3, monkeypatch):
         monkeypatch.setenv("AWS_EXE_SYS_WORKER_LAMBDA", "my-worker-fn")
 
         mock_client = MagicMock()
@@ -118,7 +129,8 @@ class TestDispatchToLambda:
         assert sent_payload["timeout_seconds"] == "3600"
         assert sent_payload["callback_url"] == ""
         assert sent_payload["callback_token"] == ""
-        assert len(sent_payload) == 10
+        assert sent_payload["execution_mode"] == ""
+        assert len(sent_payload) == 11
 
 
 class TestDispatchToCodeBuild:
@@ -142,7 +154,7 @@ class TestDispatchToCodeBuild:
 
     @patch("aws_exe_sys.init_job.dispatcher.uuid.uuid4")
     @patch("aws_exe_sys.init_job.dispatcher.boto3")
-    def test_passes_10_plain_string_fields_plus_derived_timeouts(self, mock_boto3, mock_uuid4, monkeypatch):
+    def test_passes_11_plain_string_fields_plus_derived_timeouts(self, mock_boto3, mock_uuid4, monkeypatch):
         state_machine_arn = "arn:aws:states:us-east-1:123:stateMachine:xe"
         monkeypatch.setenv("AWS_EXE_SYS_CODEBUILD_STATE_MACHINE_ARN", state_machine_arn)
         mock_uuid4.return_value.hex = "unique123"
@@ -169,6 +181,7 @@ class TestDispatchToCodeBuild:
             "timeout_seconds",
             "callback_url",
             "callback_token",
+            "execution_mode",
             "build_timeout_minutes",
             "sfn_timeout_seconds",
         }
