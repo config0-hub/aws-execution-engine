@@ -5,6 +5,16 @@ data "aws_ecr_repository" "engine" {
   name = var.engine_ecr_repository_name
 }
 
+# Existence gate, not a pin: CodeBuild still runs `:latest` (see `image`
+# below). Without this, `tofu plan/apply` plans green against an empty repo
+# and every build then fails at PROVISIONING. This forces a fail-loud error
+# here instead, when no image has been mirrored yet (infra/01-ecr +
+# scripts/mirror-image.sh).
+data "aws_ecr_image" "engine_latest" {
+  repository_name = data.aws_ecr_repository.engine.name
+  image_tag       = "latest"
+}
+
 resource "aws_codebuild_project" "worker" {
   name         = "${local.prefix}-worker"
   service_role = aws_iam_role.codebuild.arn
@@ -67,5 +77,16 @@ resource "aws_codebuild_project" "worker" {
           commands:
             - ENGINE_TASK_ROOT=/opt/engine bash /opt/engine/aws_exe_sys/worker/entrypoint.sh
     BUILDSPEC
+  }
+
+  # Forces data.aws_ecr_image.engine_latest into the plan/apply graph (an
+  # unreferenced data source is otherwise dead weight) so a missing :latest
+  # image fails loud here, at plan time, instead of the every-build
+  # PROVISIONING failure this replaces.
+  lifecycle {
+    precondition {
+      condition     = data.aws_ecr_image.engine_latest.id != ""
+      error_message = "No :latest image in the ${var.engine_ecr_repository_name} ECR repo - run scripts/mirror-image.sh (or task ecr:mirror) before applying infra/02-deploy."
+    }
   }
 }

@@ -12,12 +12,21 @@ permissions:
 env:
   IMAGE: ghcr.io/config0-hub/aws-execution-engine
 
+concurrency:
+  group: image-publish
+  cancel-in-progress: false
+
 jobs:
   build-push:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Unit tests (Dockerfile.test, mirrors Taskfile `task test`)
+        run: |
+          docker build -f docker/Dockerfile.test -t aws-execution-engine-test:latest .
+          docker run --rm aws-execution-engine-test:latest
 
       - name: Log in to ghcr.io
         uses: docker/login-action@v3
@@ -32,6 +41,18 @@ jobs:
 
       - name: Build image
         run: docker build -f docker/Dockerfile -t "$IMAGE:${{ steps.tag.outputs.sha }}" .
+
+      - name: Image smoke test
+        run: |
+          docker run --rm "$IMAGE:${{ steps.tag.outputs.sha }}" bash -c '
+            set -euo pipefail
+            python3 -c "import aws_exe_sys.worker.handler"
+            tofu version
+            sops --version
+            age --version
+            git --version
+            test "$ENGINE_TASK_ROOT" = /opt/engine
+          '
 
       - name: Push short-SHA tag
         run: docker push "$IMAGE:${{ steps.tag.outputs.sha }}"
