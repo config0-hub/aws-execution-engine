@@ -208,6 +208,16 @@ resource "aws_iam_role_policy" "codebuild" {
         Resource = data.aws_ecr_repository.engine.arn
       },
       {
+        # Direct mode (execution_mode = "direct"): the static buildspec pulls
+        # engine.zip from the deploy-artifact bucket. Restored (c013a7b had
+        # replaced it with the ECR statements above) ALONGSIDE ECR - the
+        # default engine-image mode still needs the ECR pull, direct mode
+        # needs this S3 read; neither replaces the other.
+        Effect   = "Allow"
+        Action   = ["s3:GetObject"]
+        Resource = "arn:aws:s3:::${var.engine_zip_s3_bucket}/*"
+      },
+      {
         Effect = "Allow"
         Action = ["s3:GetObject"]
         Resource = concat(
