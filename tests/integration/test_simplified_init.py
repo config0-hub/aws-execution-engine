@@ -108,11 +108,12 @@ class TestInitValidPayloadDispatch:
         call_kwargs = mock_stepfunctions.start_execution.call_args.kwargs
         assert call_kwargs["stateMachineArn"] == state_machine_arn
         sent = json.loads(call_kwargs["input"])
-        # The SFN input is the 10 SimplePayload fields plus the two derived
+        # The SFN input is the 11 SimplePayload fields plus the two derived
         # timeout fields the state machine consumes.
         assert set(sent) == set(_valid_event()) | {
             "callback_url",
             "callback_token",
+            "execution_mode",
             "build_timeout_minutes",
             "sfn_timeout_seconds",
         }
