@@ -24,7 +24,15 @@ The repo includes Terraform in `infra/` for deploying the generic engine API.
    - `engine_zip_s3_bucket`
    - `engine_zip_s3_key`
    - `sops_age_layer_s3_key`
-3. Generate Terraform vars and deploy:
+3. Create the ECR repo and mirror the engine image (required before `02-deploy` - its plan
+   fails loud when no `latest` image exists in the `aws-execution-engine` ECR repo):
+
+   ```bash
+   task ecr:apply
+   task ecr:mirror
+   ```
+
+4. Generate Terraform vars and deploy:
 
 ```bash
 cd infra/02-deploy
