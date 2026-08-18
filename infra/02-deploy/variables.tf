@@ -39,7 +39,12 @@ variable "engine_zip_s3_bucket" {
 }
 
 variable "engine_zip_s3_key" {
-  description = "S3 key for engine.zip (aws_exe_sys/ source + pip deps). Used by the init_job + worker Lambdas; CodeBuild runs the engine ECR image instead."
+  description = "S3 key for engine.zip (aws_exe_sys/ source + pip deps). Serves direct mode only (the direct-mode buildspec pulls it); the Lambdas and CodeBuild default mode run the engine ECR image."
+  type        = string
+}
+
+variable "engine_image_uri" {
+  description = "Full ECR image URI (repo URL + tag, e.g. '<ecr repo url>:latest') run by the three engine Lambdas as container images."
   type        = string
 }
 

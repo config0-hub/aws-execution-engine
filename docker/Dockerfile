@@ -1,10 +1,11 @@
-# Production image for aws-execution-engine: runs the worker as a CodeBuild
-# custom image (`infra/02-deploy/codebuild.tf` currently installs sops/age via
-# buildspec and unzips engine.zip; this image ships the same runtime content
-# pre-baked). Base Python version matches the Lambda runtime in
-# infra/02-deploy/lambdas.tf. No restrictive ENTRYPOINT: CodeBuild must be
-# free to run its own buildspec commands in this container.
-FROM python:3.14-slim
+# Production image for aws-execution-engine: serves BOTH execution targets.
+# CodeBuild default mode runs it as a custom image (buildspec commands run
+# freely inside it), and the three engine Lambdas (init-job, worker,
+# finalizer) run it as container-image Lambdas via awslambdaric (see
+# infra/02-deploy/lambdas.tf image_config). Base pinned to python:3.13-slim:
+# awslambdaric ships no cp314 wheel. No restrictive ENTRYPOINT: CodeBuild
+# must be free to run its own buildspec commands in this container.
+FROM python:3.13-slim
 
 # Pinned to match infra/02-deploy/codebuild.tf (SOPS_URL/AGE_URL) and
 # scripts/build-zip.sh (TOFU_VERSION). Bump deliberately, in both places.
@@ -43,6 +44,15 @@ WORKDIR ${ENGINE_TASK_ROOT}
 # at the PYTHONPATH root).
 COPY requirements.txt ./
 RUN python3 -m pip install --no-cache-dir -r requirements.txt --target "${ENGINE_TASK_ROOT}"
+
+# Lambda runtime interface client: lets the same image serve the three engine
+# Lambdas as container images (entry_point/command set per function in
+# infra/02-deploy/lambdas.tf).
+RUN python3 -m pip install --no-cache-dir awslambdaric --target "${ENGINE_TASK_ROOT}"
+
+# Container-image Lambdas set no working directory guarantee for module
+# resolution; make ENGINE_TASK_ROOT importable everywhere.
+ENV PYTHONPATH=/opt/engine
 
 COPY aws_exe_sys/ ${ENGINE_TASK_ROOT}/aws_exe_sys/
 

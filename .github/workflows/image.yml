@@ -47,6 +47,7 @@ jobs:
           docker run --rm "$IMAGE:${{ steps.tag.outputs.sha }}" bash -c '
             set -euo pipefail
             python3 -c "import aws_exe_sys.worker.handler"
+            python3 -c "import awslambdaric"
             tofu version
             sops --version
             age --version
