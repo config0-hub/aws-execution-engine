@@ -10,14 +10,17 @@ locals {
 resource "aws_lambda_function" "init_job" {
   function_name = "${local.prefix}-init-job"
   role          = aws_iam_role.init_job.arn
-  package_type  = "Zip"
-  s3_bucket     = var.engine_zip_s3_bucket
-  s3_key        = var.engine_zip_s3_key
-  handler       = "aws_exe_sys.init_job.handler.handler"
-  runtime       = "python3.14"
+  package_type  = "Image"
+  image_uri     = var.engine_image_uri
   architectures = ["x86_64"]
-  timeout       = local.default_lambda_timeout > 0 ? local.default_lambda_timeout : 300
-  memory_size   = local.default_lambda_memory > 0 ? local.default_lambda_memory : 512
+
+  image_config {
+    entry_point = ["/usr/local/bin/python3", "-m", "awslambdaric"]
+    command     = ["aws_exe_sys.init_job.handler.handler"]
+  }
+
+  timeout     = local.default_lambda_timeout > 0 ? local.default_lambda_timeout : 300
+  memory_size = local.default_lambda_memory > 0 ? local.default_lambda_memory : 512
 
   environment {
     variables = merge(
@@ -40,14 +43,17 @@ resource "aws_lambda_function_url" "init_job" {
 resource "aws_lambda_function" "finalizer" {
   function_name = "${local.prefix}-finalizer"
   role          = aws_iam_role.finalizer.arn
-  package_type  = "Zip"
-  s3_bucket     = var.engine_zip_s3_bucket
-  s3_key        = var.engine_zip_s3_key
-  handler       = "aws_exe_sys.finalizer.handler.handler"
-  runtime       = "python3.14"
+  package_type  = "Image"
+  image_uri     = var.engine_image_uri
   architectures = ["x86_64"]
-  timeout       = 30
-  memory_size   = 128
+
+  image_config {
+    entry_point = ["/usr/local/bin/python3", "-m", "awslambdaric"]
+    command     = ["aws_exe_sys.finalizer.handler.handler"]
+  }
+
+  timeout     = 30
+  memory_size = 128
 }
 
 # --- worker: executes payload commands and decrypts optional SOPS payloads. ---
@@ -55,15 +61,17 @@ resource "aws_lambda_function" "finalizer" {
 resource "aws_lambda_function" "worker" {
   function_name = "${local.prefix}-worker"
   role          = aws_iam_role.worker.arn
-  package_type  = "Zip"
-  s3_bucket     = var.engine_zip_s3_bucket
-  s3_key        = var.engine_zip_s3_key
-  handler       = "aws_exe_sys.worker.handler.handler"
-  runtime       = "python3.14"
+  package_type  = "Image"
+  image_uri     = var.engine_image_uri
   architectures = ["x86_64"]
-  layers        = [aws_lambda_layer_version.sops_age.arn]
-  timeout       = local.default_lambda_timeout > 0 ? local.default_lambda_timeout : 600
-  memory_size   = local.default_lambda_memory > 0 ? local.default_lambda_memory : 2048
+
+  image_config {
+    entry_point = ["/usr/local/bin/python3", "-m", "awslambdaric"]
+    command     = ["aws_exe_sys.worker.handler.handler"]
+  }
+
+  timeout     = local.default_lambda_timeout > 0 ? local.default_lambda_timeout : 600
+  memory_size = local.default_lambda_memory > 0 ? local.default_lambda_memory : 2048
 
   # Commands may unpack large caller-provided packages and their dependencies.
   ephemeral_storage {

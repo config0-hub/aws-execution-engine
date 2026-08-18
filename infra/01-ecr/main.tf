@@ -18,4 +18,9 @@ provider "aws" {
 
 resource "aws_ecr_repository" "this" {
   name = "aws-execution-engine"
+
+  # Allow destroy even when the repo holds images (a plain destroy of a
+  # non-empty repo fails with RepositoryNotEmptyException). Required by the
+  # one-time `task ecr:recover-destroy` recovery flow.
+  force_delete = true
 }
