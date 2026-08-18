@@ -42,32 +42,6 @@ tasks:
       - tofu -chdir=infra/01-ecr init
       - tofu -chdir=infra/01-ecr apply -auto-approve
 
-  ecr:recover-destroy:
-    desc: >-
-      TEMPORARY one-time recovery (R2-01), remove after use: import the
-      hand-made tenant ECR repo into fresh infra/01-ecr state and destroy it,
-      then prove it is gone. Requires tenant creds env, e.g.
-      `source ~/project/repos/hamburger/exclude_folder/aws/gear+dev101@thytruth.com/exports.env`
-      with region ap-northeast-1. Run by the lead during the clean-tenant
-      window only.
-    cmds:
-      # force_delete = true must be on the resource before destroy: the repo
-      # holds images and a plain destroy fails RepositoryNotEmptyException.
-      - grep -q 'force_delete = true' infra/01-ecr/main.tf
-      - tofu -chdir=infra/01-ecr init
-      - tofu -chdir=infra/01-ecr import aws_ecr_repository.this aws-execution-engine
-      # Apply the imported config (picks up force_delete) then destroy.
-      - tofu -chdir=infra/01-ecr apply -auto-approve
-      - tofu -chdir=infra/01-ecr destroy -auto-approve
-      # Assert the repository is truly gone (must fail with
-      # RepositoryNotFoundException specifically, not e.g. a creds error).
-      - |
-        out=$(aws ecr describe-repositories --repository-names aws-execution-engine 2>&1) \
-          && { echo "ERROR: aws-execution-engine repository still exists" >&2; exit 1; }
-        echo "$out" | grep -q RepositoryNotFoundException \
-          || { echo "ERROR: describe-repositories failed for another reason: $out" >&2; exit 1; }
-        echo "OK: aws-execution-engine repository is absent"
-
   ecr:mirror:
     desc: >-
       Mirror the public GHCR image into the tenant ECR repo (infra/01-ecr
