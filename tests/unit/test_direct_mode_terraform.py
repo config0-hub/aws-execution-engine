@@ -52,8 +52,14 @@ class TestDirectModeBuildspec:
         buildspec = source.split("direct_mode_buildspec = <<-BUILDSPEC")[1].split("BUILDSPEC")[0]
 
         # install phase: pinned sops + age into /usr/local/bin.
-        assert '- curl -fsSL "$SOPS_URL" -o /usr/local/bin/sops && chmod +x /usr/local/bin/sops' in buildspec
-        assert '- curl -fsSL "$AGE_URL" | tar xz --strip-components=1 -C /usr/local/bin age/age age/age-keygen' in buildspec
+        assert (
+            '- curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors "$SOPS_URL" -o /usr/local/bin/sops && chmod +x /usr/local/bin/sops'
+            in buildspec
+        )
+        assert (
+            '- curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors "$AGE_URL" | tar xz --strip-components=1 -C /usr/local/bin age/age age/age-keygen'
+            in buildspec
+        )
         # build phase: engine.zip pull + ENGINE_TASK_ROOT entrypoint invocation.
         assert '- aws s3 cp "s3://$ENGINE_ZIP_S3_BUCKET/$ENGINE_ZIP_S3_KEY" /tmp/engine.zip' in buildspec
         assert "- mkdir -p /work && unzip -q /tmp/engine.zip -d /work" in buildspec
