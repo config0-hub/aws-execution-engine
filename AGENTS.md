@@ -133,6 +133,30 @@ QHost requests `assume_target` and `assume_engine` through `/api/v1/creds`; conf
 performs the AWS Security Token Service role assumption. If required cross-account
 credentials are missing or failed, the order fails before the engine is invoked.
 
+## Host-order credentials
+
+`group/orders/host/add` invokes the SSM EC2 executor directly, not the xe
+engine. Both the aggregate and child carry the hub `assume_engine` session as
+ambient `AWS_*` and the target `assume_target` session as `CONFIG0_TARGET_AWS_*`.
+This replaces the host-order target-only rule, including when hub equals target.
+
+The host-order CLI uses the hub session only for the existing hub `TMP_BUCKET`:
+package upload, presigned package/workspace/marker URLs, marker reads and cleanup.
+The `run_publisher` polls that same done URI with its hub session. The CLI uses
+the target session for the install's KMS encryption and Step Functions calls.
+The host uses its target-account instance profile for KMS decryption and the
+hub-signed URLs for download and reporting. The target role gets no hub-bucket
+access. Queue writes retain their separate run-scoped credentials.
+
+The marker-bucket region check uses `HeadBucket` under the existing `ListBucket`
+grant, and fails if its actual region differs from the worker's region or is
+missing. Presigned URLs end before both the hub signing session's
+`CONFIG0_ENGINE_CREDS_EXPIRE_AT` and the target session's
+`CONFIG0_TARGET_CREDS_EXPIRE_AT`, with the existing report margin. Missing
+sessions, deadlines or `TMP_BUCKET` fail before firing. The existing package,
+conditional done-marker PUT, park, polling and finalize mechanism is unchanged.
+No bucket, role, route, table or IAM policy is added for this path.
+
 ## HARD RULE: one plumbing, no alternates
 
 The engine is a GENERIC automation engine, not an IaC runner. EVERY delegated execution —
