@@ -17,7 +17,7 @@ import zipfile
 from aws_exe_sys.common.callback import post_callback
 from aws_exe_sys.common.result_writer import ExecutionResult, write_result
 from aws_exe_sys.common.sops import SopsKeyExpired, handle_sops
-from aws_exe_sys.common.subprocess_runner import run_commands
+from aws_exe_sys.common.subprocess_runner import ExecutionTimedOut, run_commands
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +69,7 @@ def run(
     commands_b64: str,
     done_endpoint: str,
     execution_target: str,
+    timeout_seconds: int,
     callback_url: str | None = None,
     callback_token: str | None = None,
 ) -> str:
@@ -84,9 +85,15 @@ def run(
         7. ALWAYS write_result to done_endpoint (even on failure)
         8. If callback_url is set, best-effort POST the result (log-only on failure)
 
+    ``timeout_seconds`` is the payload's T: one deadline for the whole run,
+    counted from entry (package fetch, decrypt and every command share it).
+    When it passes, the running command's process group is killed and the
+    result is ``failed`` with an error that names T.
+
     Returns the final status string ("succeeded" or "failed").
     """
     started_at = time.monotonic()
+    deadline = started_at + timeout_seconds
     result: ExecutionResult | None = None
 
     try:
@@ -116,7 +123,7 @@ def run(
             proc_env.pop("AWS_SESSION_TOKEN", None)
 
         # 6. Execute commands
-        steps = run_commands(commands, env=proc_env, work_dir=work_dir)
+        steps = run_commands(commands, env=proc_env, work_dir=work_dir, deadline=deadline)
 
         # 7. Determine overall status
         if steps and all(s.status == "succeeded" for s in steps):
@@ -128,6 +135,15 @@ def run(
             trigger_id=trigger_id,
             status=status,
             steps=steps,
+        )
+
+    except ExecutionTimedOut as exc:
+        logger.error("Execution timed out at %ss: %s", timeout_seconds, exc)
+        result = ExecutionResult(
+            trigger_id=trigger_id,
+            status="failed",
+            steps=exc.steps,
+            error=f"execution timed out at {timeout_seconds} seconds: {exc}",
         )
 
     except SopsKeyExpired as exc:

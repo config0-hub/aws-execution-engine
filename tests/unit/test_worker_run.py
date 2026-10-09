@@ -100,8 +100,9 @@ class TestScratchCleanup:
             *,
             env: dict[str, str],
             work_dir: str,
+            deadline: float,
         ) -> list[StepResult]:
-            del commands, env
+            del commands, env, deadline
             current_workdir = Path(work_dir)
             if workdirs:
                 assert not workdirs[0].exists()
@@ -131,6 +132,7 @@ class TestScratchCleanup:
                 commands_b64=_encode_commands(["echo ok"]),
                 done_endpoint=DONE_ENDPOINT,
                 execution_target="lambda",
+                timeout_seconds=3600,
             )
             assert status == "succeeded"
 
@@ -159,6 +161,7 @@ class TestScratchCleanup:
             commands_b64=_encode_commands(["echo never"]),
             done_endpoint=DONE_ENDPOINT,
             execution_target="lambda",
+            timeout_seconds=3600,
         )
 
         assert status == "failed"
@@ -197,6 +200,7 @@ class TestRunHappyPath:
             commands_b64=_encode_commands(["echo hello"]),
             done_endpoint=DONE_ENDPOINT,
             execution_target="lambda",
+            timeout_seconds=3600,
         )
 
         assert status == "succeeded"
@@ -233,6 +237,7 @@ class TestRunHappyPath:
             commands_b64=_encode_commands(["echo hi"]),
             done_endpoint=DONE_ENDPOINT,
             execution_target="codebuild",
+            timeout_seconds=3600,
         )
 
         assert status == "succeeded"
@@ -265,6 +270,7 @@ class TestRunHappyPath:
             commands_b64=_encode_commands(["echo test"]),
             done_endpoint=DONE_ENDPOINT,
             execution_target="lambda",
+            timeout_seconds=3600,
         )
 
         # Check that env dict passed to run_commands includes the SOPS var
@@ -293,6 +299,7 @@ class TestRunS3DownloadFail:
             commands_b64=_encode_commands(["echo never"]),
             done_endpoint=DONE_ENDPOINT,
             execution_target="lambda",
+            timeout_seconds=3600,
         )
 
         assert status == "failed"
@@ -327,6 +334,7 @@ class TestRunSopsFail:
             commands_b64=_encode_commands(["echo never"]),
             done_endpoint=DONE_ENDPOINT,
             execution_target="lambda",
+            timeout_seconds=3600,
         )
 
         assert status == "failed"
@@ -356,6 +364,7 @@ class TestRunSopsFail:
             commands_b64=_encode_commands(["echo never"]),
             done_endpoint=DONE_ENDPOINT,
             execution_target="lambda",
+            timeout_seconds=3600,
         )
 
         assert status == "failed"
@@ -390,6 +399,7 @@ class TestRunCommandFail:
             commands_b64=_encode_commands(["echo ok", "exit 1", "echo unreachable"]),
             done_endpoint=DONE_ENDPOINT,
             execution_target="codebuild",
+            timeout_seconds=3600,
         )
 
         assert status == "failed"
@@ -421,6 +431,7 @@ class TestRunAlwaysWritesResult:
             commands_b64=_encode_commands(["echo"]),
             done_endpoint=DONE_ENDPOINT,
             execution_target="lambda",
+            timeout_seconds=3600,
         )
 
         mock_write.assert_called_once()
@@ -448,6 +459,7 @@ class TestRunAlwaysWritesResult:
             commands_b64=_encode_commands(["echo"]),
             done_endpoint=DONE_ENDPOINT,
             execution_target="lambda",
+            timeout_seconds=3600,
         )
 
         mock_write.assert_called_once()
@@ -472,6 +484,7 @@ class TestRunAlwaysWritesResult:
             commands_b64=_encode_commands(["echo"]),
             done_endpoint=DONE_ENDPOINT,
             execution_target="lambda",
+            timeout_seconds=3600,
         )
 
         mock_write.assert_called_once()
@@ -496,6 +509,7 @@ class TestRunAlwaysWritesResult:
                 commands_b64=_encode_commands(["echo"]),
                 done_endpoint=DONE_ENDPOINT,
                 execution_target="lambda",
+                timeout_seconds=3600,
             )
 
 
@@ -526,6 +540,7 @@ class TestRunCallback:
             commands_b64=_encode_commands(["echo ok"]),
             done_endpoint=DONE_ENDPOINT,
             execution_target="lambda",
+            timeout_seconds=3600,
         )
 
         mock_post_callback.assert_called_once_with(None, None, mock_write.call_args[0][1])
@@ -557,6 +572,7 @@ class TestRunCallback:
             commands_b64=_encode_commands(["echo ok"]),
             done_endpoint=DONE_ENDPOINT,
             execution_target="lambda",
+            timeout_seconds=3600,
             callback_url="https://caller.example.com/hooks/done",
             callback_token="tok-abc",
         )
@@ -591,6 +607,7 @@ class TestRunCallback:
             commands_b64=_encode_commands(["echo never"]),
             done_endpoint=DONE_ENDPOINT,
             execution_target="lambda",
+            timeout_seconds=3600,
             callback_url="https://caller.example.com/hooks/done",
             callback_token="tok-abc",
         )
@@ -622,11 +639,79 @@ class TestRunCallback:
                 commands_b64=_encode_commands(["echo"]),
                 done_endpoint=DONE_ENDPOINT,
                 execution_target="lambda",
+                timeout_seconds=3600,
                 callback_url="https://caller.example.com/hooks/done",
                 callback_token="tok-abc",
             )
 
         mock_post_callback.assert_not_called()
+
+
+class TestRunDeadline:
+    """timeout_seconds (T) is the deadline for the whole run: the command is
+    killed and the marker is ``failed`` with an error that names T."""
+
+    @patch("aws_exe_sys.worker.run.write_result")
+    @patch("aws_exe_sys.worker.run.fetch_code_s3")
+    def test_command_longer_than_timeout_writes_timed_out_failed_result(
+        self,
+        mock_fetch,
+        mock_write,
+        tmp_path,
+    ):
+        mock_fetch.return_value = str(tmp_path)
+
+        status = run(
+            trigger_id="t-timeout",
+            s3_package_uri="s3://bucket/exec.zip",
+            sops_type=None,
+            sops_path=None,
+            commands_b64=_encode_commands(["echo ok", "sleep 30", "echo never"]),
+            done_endpoint=DONE_ENDPOINT,
+            execution_target="lambda",
+            timeout_seconds=1,
+        )
+
+        assert status == "failed"
+        mock_write.assert_called_once()
+        result_arg = mock_write.call_args[0][1]
+        assert result_arg.status == "failed"
+        assert result_arg.error.startswith("execution timed out at 1 seconds")
+        assert [s.step_name for s in result_arg.steps] == ["step-0", "step-1"]
+        assert result_arg.steps[0].status == "succeeded"
+        assert result_arg.steps[1].status == "failed"
+
+    @patch("aws_exe_sys.worker.run.write_result")
+    @patch("aws_exe_sys.worker.run.run_commands")
+    @patch("aws_exe_sys.worker.run.fetch_code_s3")
+    def test_deadline_counts_from_run_entry(
+        self,
+        mock_fetch,
+        mock_run_cmds,
+        mock_write,
+    ):
+        """The deadline handed to run_commands is entry + T, not a fresh T after fetch/decrypt."""
+        import time
+
+        mock_fetch.return_value = "/tmp/work"
+        mock_run_cmds.return_value = [
+            StepResult(step_name="step-0", status="succeeded", exit_code=0, duration_seconds=0.1, output="ok"),
+        ]
+        before = time.monotonic()
+
+        run(
+            trigger_id="t-deadline",
+            s3_package_uri="s3://bucket/exec.zip",
+            sops_type=None,
+            sops_path=None,
+            commands_b64=_encode_commands(["echo ok"]),
+            done_endpoint=DONE_ENDPOINT,
+            execution_target="lambda",
+            timeout_seconds=600,
+        )
+
+        deadline = mock_run_cmds.call_args.kwargs["deadline"]
+        assert before + 600 <= deadline <= time.monotonic() + 600
 
 
 class TestRunNoEnvironMutation:
@@ -658,6 +743,7 @@ class TestRunNoEnvironMutation:
             commands_b64=_encode_commands(["echo"]),
             done_endpoint=DONE_ENDPOINT,
             execution_target="lambda",
+            timeout_seconds=3600,
         )
         env_after = os.environ.copy()
 
