@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+import contextlib
 import os
 import signal
 import subprocess
@@ -30,28 +32,36 @@ class ExecutionTimedOut(Exception):
 def boto_config_until(deadline: float) -> Config:
     """A botocore ``Config`` whose connect and read timeouts are the time left to ``deadline``.
 
-    A stalled AWS call (headers sent, body withheld) then surfaces as a
-    ``ReadTimeoutError`` at the deadline instead of hanging on botocore's own
-    default timeout; :func:`call_until_deadline` maps it to ExecutionTimedOut.
+    Retries are off (one attempt), so a stalled AWS call (headers sent, body
+    withheld) surfaces once as a ``ReadTimeoutError`` or ``ConnectTimeoutError``
+    at the deadline, in the calling thread, instead of being retried against
+    the same timeout after T; :func:`until_deadline` maps it to ExecutionTimedOut.
     """
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise ExecutionTimedOut("deadline passed", [])
-    return Config(connect_timeout=remaining, read_timeout=remaining)
+    return Config(connect_timeout=remaining, read_timeout=remaining, retries={"total_max_attempts": 1})
+
+
+@contextlib.contextmanager
+def until_deadline(what: str) -> Iterator[None]:
+    """Make a botocore connect/read timeout inside the block the execution deadline.
+
+    Every AWS call under the execution deadline runs inside this block, on a
+    client built with :func:`boto_config_until`: the package GetObject and its
+    body read, the SSM key GetParameter and DeleteParameter. The call runs in
+    the calling thread, nothing is started that could outlive it, and a
+    timeout raises ExecutionTimedOut so the result marker is written at T
+    exactly as for a killed command. Every other error propagates unchanged.
+    """
+    try:
+        yield
+    except (ReadTimeoutError, ConnectTimeoutError) as exc:
+        raise ExecutionTimedOut(f"deadline passed while {what}: {exc}", []) from exc
 
 
 def call_until_deadline(fn, *, deadline: float, what: str) -> Any:
-    """Run the blocking ``fn()`` on a thread and wait for it no later than ``deadline``.
-
-    Every blocking preparation call under the execution deadline goes through
-    here: the package download and extraction, the SSM key fetch and delete,
-    the stale-workspace cleanup. A call that has not returned by the deadline
-    is abandoned (a daemon thread, so it never delays the process exit of the
-    CodeBuild delivery) and ExecutionTimedOut is raised, so the result marker
-    is written at T exactly as for a killed command. A call that returns or
-    raises in time returns or raises here unchanged, except that a botocore
-    connect/read timeout (see :func:`boto_config_until`) is the deadline too.
-    """
+    """Run the blocking ``fn()`` on a thread and wait for it no later than ``deadline``."""
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise ExecutionTimedOut(f"deadline passed before {what}", [])

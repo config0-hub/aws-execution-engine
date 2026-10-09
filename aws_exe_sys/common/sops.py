@@ -16,8 +16,8 @@ from botocore.exceptions import ClientError
 from aws_exe_sys.common.subprocess_runner import (
     ExecutionTimedOut,
     boto_config_until,
-    call_until_deadline,
     run_until_deadline,
+    until_deadline,
 )
 
 
@@ -68,11 +68,8 @@ def fetch_sops_key_ssm(ssm_path: str, *, deadline: float) -> str:
     """
     ssm = boto3.client("ssm", config=boto_config_until(deadline))
     try:
-        resp = call_until_deadline(
-            lambda: ssm.get_parameter(Name=ssm_path, WithDecryption=True),
-            deadline=deadline,
-            what="fetching the SOPS key from SSM",
-        )
+        with until_deadline("fetching the SOPS key from SSM"):
+            resp = ssm.get_parameter(Name=ssm_path, WithDecryption=True)
     except ssm.exceptions.ParameterNotFound as exc:
         raise SopsKeyExpired(f"SOPS key at SSM path {ssm_path!r} is missing or expired") from exc
     except ClientError as exc:
@@ -88,12 +85,11 @@ def fetch_sops_key_ssm(ssm_path: str, *, deadline: float) -> str:
 def delete_sops_key_ssm(ssm_path: str, *, deadline: float) -> None:
     """Delete SOPS age private key from SSM (cleanup after decryption), no later than ``deadline``."""
     ssm = boto3.client("ssm", config=boto_config_until(deadline))
-    with contextlib.suppress(ssm.exceptions.ParameterNotFound):  # Already expired or deleted if not found
-        call_until_deadline(
-            lambda: ssm.delete_parameter(Name=ssm_path),
-            deadline=deadline,
-            what="deleting the SOPS key from SSM",
-        )
+    with (
+        contextlib.suppress(ssm.exceptions.ParameterNotFound),  # Already expired or deleted if not found
+        until_deadline("deleting the SOPS key from SSM"),
+    ):
+        ssm.delete_parameter(Name=ssm_path)
 
 
 def decrypt_env(
@@ -164,7 +160,7 @@ def handle_sops(
         sops_path: SSM parameter path for the age key (required when
             sops_type="ssm").
         deadline: ``time.monotonic()`` value of the worker's whole-execution
-            deadline; the SSM key fetch and delete are abandoned and
+            deadline; the SSM key fetch and delete end at it and
             ``sops --decrypt`` is killed when it passes.
 
     Returns:

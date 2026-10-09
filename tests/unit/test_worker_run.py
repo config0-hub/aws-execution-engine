@@ -7,6 +7,8 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
+import sys
 import threading
 import time
 from unittest.mock import ANY, patch
@@ -52,7 +54,7 @@ class TestScratchCleanup:
         outside_file.write_text("outside the worker scratch root")
         (owned_first / "provider-cache").write_text("stale")
 
-        cleanup_stale_workdirs()
+        cleanup_stale_workdirs(deadline=time.monotonic() + 60)
 
         assert not owned_first.exists()
         assert not owned_second.exists()
@@ -74,7 +76,7 @@ class TestScratchCleanup:
         mock_rmtree.side_effect = OSError("cleanup denied")
 
         with pytest.raises(OSError, match="cleanup denied"):
-            cleanup_stale_workdirs()
+            cleanup_stale_workdirs(deadline=time.monotonic() + 60)
 
     @patch("aws_exe_sys.worker.run.write_result")
     @patch("aws_exe_sys.worker.run.run_commands")
@@ -95,11 +97,13 @@ class TestScratchCleanup:
         foreign_file.write_text("keep")
         workdirs: list[Path] = []
 
-        def download_zip(bucket: str, key: str, destination: str, **_transfer_kwargs) -> None:
-            assert bucket == "bucket"
-            assert key == "exec.zip"
-            with zipfile.ZipFile(destination, "w") as archive:
-                archive.writestr("package.txt", "package")
+        def get_package(Bucket: str, Key: str) -> dict:
+            assert Bucket == "bucket"
+            assert Key == "exec.zip"
+            archive = io.BytesIO()
+            with zipfile.ZipFile(archive, "w") as zf:
+                zf.writestr("package.txt", "package")
+            return {"Body": io.BytesIO(archive.getvalue())}
 
         def execute_commands(
             commands: list[str],
@@ -126,7 +130,7 @@ class TestScratchCleanup:
                 ),
             ]
 
-        mock_boto_client.return_value.download_file.side_effect = download_zip
+        mock_boto_client.return_value.get_object.side_effect = get_package
         mock_run_commands.side_effect = execute_commands
 
         for trigger_id in ("first", "second"):
@@ -855,6 +859,42 @@ class TestRunDeadlineCoversPreparation:
         assert marker["status"] == "failed"
         assert marker["error"].startswith("execution timed out at 1 seconds")
         assert "fetching the SOPS key from SSM" in marker["error"]
+        assert marker["steps"] == []
+
+    def test_codebuild_entry_exits_at_timeout_with_the_download_stalled(self, stalled_aws):
+        """The CodeBuild delivery (``entrypoint.sh`` → ``python3 -m aws_exe_sys.worker.handler``)
+        must EXIT near T, not only write its marker near T: nothing the package
+        fetch started may be joined at interpreter exit while the body is withheld."""
+        stalled_aws.STALL_GET = True
+        env = {
+            **os.environ,
+            "TRIGGER_ID": "t-stalled",
+            "S3_PACKAGE_URI": "s3://pkg-bucket/exec/stalled.zip",
+            "COMMANDS_B64": _encode_commands(["echo never"]),
+            "DONE_ENDPOINT": DONE_ENDPOINT,
+            "EXECUTION_TARGET": "codebuild",
+            "TIMEOUT_SECONDS": "1",
+        }
+        started = time.monotonic()
+
+        proc = subprocess.run(
+            [sys.executable, "-m", "aws_exe_sys.worker.handler"],
+            cwd=Path(__file__).resolve().parents[2],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=stalled_aws.STALL_SECONDS + 10,
+        )
+
+        exited_at = time.monotonic()
+        assert proc.returncode == 1, proc.stderr
+        assert exited_at - started < self.MARKER_WITHIN_SECONDS, f"process waited for the withheld body: {proc.stderr}"
+        assert len(stalled_aws.markers) == 1
+        written_at, marker = stalled_aws.markers[0]
+        assert written_at - started < self.MARKER_WITHIN_SECONDS, "marker waited for the withheld body"
+        assert marker["status"] == "failed"
+        assert marker["error"].startswith("execution timed out at 1 seconds")
+        assert "fetching the package" in marker["error"]
         assert marker["steps"] == []
 
     @patch("aws_exe_sys.worker.run.write_result")

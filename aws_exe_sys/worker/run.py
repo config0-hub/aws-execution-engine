@@ -20,14 +20,15 @@ from aws_exe_sys.common.sops import SopsKeyExpired, handle_sops
 from aws_exe_sys.common.subprocess_runner import (
     ExecutionTimedOut,
     boto_config_until,
-    call_until_deadline,
     run_commands,
+    until_deadline,
 )
 
 logger = logging.getLogger(__name__)
 
 _SCRATCH_ROOT_NAME = "aws-exe-sys-worker"
 _WORKDIR_PREFIX = "run-"
+_PACKAGE_CHUNK_BYTES = 1 << 20
 
 
 def _scratch_root() -> Path:
@@ -35,12 +36,14 @@ def _scratch_root() -> Path:
     return Path(tempfile.gettempdir()) / _SCRATCH_ROOT_NAME
 
 
-def cleanup_stale_workdirs() -> None:
-    """Remove stale worker-owned run directories from the scratch root."""
+def cleanup_stale_workdirs(*, deadline: float) -> None:
+    """Remove stale worker-owned run directories from the scratch root, no later than ``deadline``."""
     scratch_root = _scratch_root()
     scratch_root.mkdir(parents=True, exist_ok=True)
 
     for path in scratch_root.iterdir():
+        if time.monotonic() >= deadline:
+            raise ExecutionTimedOut("deadline passed while cleaning stale workspaces", [])
         if path.name.startswith(_WORKDIR_PREFIX) and not path.is_symlink() and path.is_dir():
             shutil.rmtree(path)
 
@@ -48,9 +51,13 @@ def cleanup_stale_workdirs() -> None:
 def fetch_code_s3(s3_location: str, *, deadline: float) -> str:
     """Download and extract a zip from S3 under the execution deadline.
 
-    Returns the path to the extracted directory. The download (a stalled one
-    included) and the extraction each end at ``deadline`` with
-    :class:`ExecutionTimedOut`, through :func:`call_until_deadline`.
+    Returns the path to the extracted directory. The package is one GetObject
+    whose body is read in the calling thread, chunk by chunk, on a client
+    whose connect/read timeouts are the time left and whose retries are off
+    (:func:`boto_config_until`): a stalled read raises at ``deadline`` as
+    :class:`ExecutionTimedOut` (:func:`until_deadline`), and nothing is
+    started that the process would wait for at exit. Extraction checks the
+    deadline between members.
     """
     import boto3
 
@@ -63,14 +70,18 @@ def fetch_code_s3(s3_location: str, *, deadline: float) -> str:
 
     local_zip = os.path.join(work_dir, "code.zip")
     s3_client = boto3.client("s3", config=boto_config_until(deadline))
-    call_until_deadline(
-        lambda: s3_client.download_file(bucket, key, local_zip),
-        deadline=deadline,
-        what="fetching the package",
-    )
+    with until_deadline("fetching the package"), open(local_zip, "wb") as out:
+        body = s3_client.get_object(Bucket=bucket, Key=key)["Body"]
+        while chunk := body.read(_PACKAGE_CHUNK_BYTES):
+            if time.monotonic() >= deadline:
+                raise ExecutionTimedOut("deadline passed while fetching the package", [])
+            out.write(chunk)
 
     with zipfile.ZipFile(local_zip, "r") as zf:
-        call_until_deadline(lambda: zf.extractall(work_dir), deadline=deadline, what="extracting the package")
+        for member in zf.infolist():
+            if time.monotonic() >= deadline:
+                raise ExecutionTimedOut("deadline passed while extracting the package", [])
+            zf.extract(member, work_dir)
     os.unlink(local_zip)
     return work_dir
 
@@ -102,9 +113,9 @@ def run(
     ``timeout_seconds`` is the payload's T: one deadline for the whole run,
     counted from entry and enforced at every stage: every blocking preparation
     call (workspace cleanup, package download and extraction, the SSM key
-    fetch and delete) is abandoned at the deadline, ``sops --decrypt`` and the
-    running command are killed with their process groups. The result is then
-    ``failed`` with an error that names T.
+    fetch and delete) ends at the deadline in the calling thread, ``sops
+    --decrypt`` and the running command are killed with their process groups.
+    The result is then ``failed`` with an error that names T.
 
     Returns the final status string ("succeeded" or "failed").
     """
@@ -114,7 +125,7 @@ def run(
 
     try:
         # 1. Remove workspaces left by earlier warm-container invocations.
-        call_until_deadline(cleanup_stale_workdirs, deadline=deadline, what="cleaning stale workspaces")
+        cleanup_stale_workdirs(deadline=deadline)
 
         # 2. Download and extract code package
         work_dir = fetch_code_s3(s3_package_uri, deadline=deadline)

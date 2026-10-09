@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import time
 
-from botocore.exceptions import ReadTimeoutError
+from botocore.exceptions import ConnectTimeoutError, ReadTimeoutError
 import pytest
 
 from aws_exe_sys.common.subprocess_runner import (
@@ -13,6 +13,7 @@ from aws_exe_sys.common.subprocess_runner import (
     boto_config_until,
     call_until_deadline,
     run_commands,
+    until_deadline,
 )
 
 
@@ -194,3 +195,26 @@ class TestCallUntilDeadline:
     def test_boto_config_refuses_a_passed_deadline(self):
         with pytest.raises(ExecutionTimedOut):
             boto_config_until(time.monotonic() - 1)
+
+
+class TestUntilDeadline:
+    """An AWS call under the deadline runs in the calling thread; its botocore
+    timeout (the time left, retries off) is the deadline, every other error passes."""
+
+    def test_botocore_read_timeout_is_the_deadline(self):
+        with pytest.raises(ExecutionTimedOut, match="while fetching: Read timeout"), until_deadline("fetching"):
+            raise ReadTimeoutError(endpoint_url="http://127.0.0.1:1/x")
+
+    def test_botocore_connect_timeout_is_the_deadline(self):
+        with pytest.raises(ExecutionTimedOut, match="while fetching: Connect timeout"), until_deadline("fetching"):
+            raise ConnectTimeoutError(endpoint_url="http://127.0.0.1:1/x")
+
+    def test_other_errors_pass_unchanged(self):
+        with pytest.raises(KeyError, match="boom"), until_deadline("looking up"):
+            {}["boom"]
+
+    def test_boto_config_carries_the_remaining_time_with_retries_off(self):
+        config = boto_config_until(time.monotonic() + 10)
+        assert 9 < config.read_timeout <= 10
+        assert 9 < config.connect_timeout <= 10
+        assert config.retries == {"total_max_attempts": 1}
