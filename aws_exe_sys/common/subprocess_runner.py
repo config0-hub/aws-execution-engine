@@ -7,9 +7,7 @@ import contextlib
 import os
 import signal
 import subprocess
-import threading
 import time
-from typing import Any
 
 from botocore.config import Config
 from botocore.exceptions import ConnectTimeoutError, ReadTimeoutError
@@ -58,33 +56,6 @@ def until_deadline(what: str) -> Iterator[None]:
         yield
     except (ReadTimeoutError, ConnectTimeoutError) as exc:
         raise ExecutionTimedOut(f"deadline passed while {what}: {exc}", []) from exc
-
-
-def call_until_deadline(fn, *, deadline: float, what: str) -> Any:
-    """Run the blocking ``fn()`` on a thread and wait for it no later than ``deadline``."""
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
-        raise ExecutionTimedOut(f"deadline passed before {what}", [])
-
-    outcome: dict[str, Any] = {}
-
-    def _target() -> None:
-        try:
-            outcome["value"] = fn()
-        except BaseException as exc:  # noqa: BLE001 - relayed to the calling thread unchanged, never handled here
-            outcome["error"] = exc
-
-    thread = threading.Thread(target=_target, name=f"deadline:{what}", daemon=True)
-    thread.start()
-    thread.join(timeout=remaining)
-    if thread.is_alive():
-        raise ExecutionTimedOut(f"deadline passed while {what}; call abandoned", [])
-    if "error" in outcome:
-        error = outcome["error"]
-        if isinstance(error, (ReadTimeoutError, ConnectTimeoutError)):
-            raise ExecutionTimedOut(f"deadline passed while {what}: {error}", []) from error
-        raise error
-    return outcome["value"]
 
 
 def run_until_deadline(
