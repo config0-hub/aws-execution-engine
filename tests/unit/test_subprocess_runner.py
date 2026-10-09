@@ -5,9 +5,15 @@ from pathlib import Path
 import tempfile
 import time
 
+from botocore.exceptions import ReadTimeoutError
 import pytest
 
-from aws_exe_sys.common.subprocess_runner import ExecutionTimedOut, run_commands
+from aws_exe_sys.common.subprocess_runner import (
+    ExecutionTimedOut,
+    boto_config_until,
+    call_until_deadline,
+    run_commands,
+)
 
 
 def _far() -> float:
@@ -151,3 +157,40 @@ class TestRunCommandsDeadline:
         with pytest.raises(ExecutionTimedOut) as excinfo:
             run_commands(["echo never"], deadline=time.monotonic() - 1)
         assert excinfo.value.steps == []
+
+
+class TestCallUntilDeadline:
+    """A blocking preparation call ends at the deadline: abandoned, not waited for."""
+
+    def test_returns_the_value_in_time(self):
+        assert call_until_deadline(lambda: 42, deadline=_far(), what="computing") == 42
+
+    def test_reraises_the_callable_error_unchanged(self):
+        with pytest.raises(KeyError, match="boom"):
+            call_until_deadline(lambda: {}["boom"], deadline=_far(), what="looking up")
+
+    def test_stalled_call_is_abandoned_at_the_deadline(self):
+        started = time.monotonic()
+        with pytest.raises(ExecutionTimedOut, match="while stalling; call abandoned"):
+            call_until_deadline(lambda: time.sleep(30), deadline=time.monotonic() + 0.5, what="stalling")
+        assert time.monotonic() - started < 5
+
+    def test_deadline_already_passed_calls_nothing(self):
+        with pytest.raises(ExecutionTimedOut, match="before stalling"):
+            call_until_deadline(lambda: pytest.fail("called"), deadline=time.monotonic() - 1, what="stalling")
+
+    def test_botocore_read_timeout_is_the_deadline(self):
+        def _read_timeout():
+            raise ReadTimeoutError(endpoint_url="http://127.0.0.1:1/x")
+
+        with pytest.raises(ExecutionTimedOut, match="while fetching: Read timeout"):
+            call_until_deadline(_read_timeout, deadline=_far(), what="fetching")
+
+    def test_boto_config_carries_the_remaining_time(self):
+        config = boto_config_until(time.monotonic() + 10)
+        assert 9 < config.read_timeout <= 10
+        assert 9 < config.connect_timeout <= 10
+
+    def test_boto_config_refuses_a_passed_deadline(self):
+        with pytest.raises(ExecutionTimedOut):
+            boto_config_until(time.monotonic() - 1)

@@ -13,7 +13,12 @@ import time
 import boto3
 from botocore.exceptions import ClientError
 
-from aws_exe_sys.common.subprocess_runner import ExecutionTimedOut, run_until_deadline
+from aws_exe_sys.common.subprocess_runner import (
+    ExecutionTimedOut,
+    boto_config_until,
+    call_until_deadline,
+    run_until_deadline,
+)
 
 
 class SopsKeyExpired(Exception):
@@ -51,18 +56,23 @@ def _run_cmd(cmd: list, env: dict | None = None, *, deadline: float) -> str:
     return stdout
 
 
-def fetch_sops_key_ssm(ssm_path: str) -> str:
-    """Fetch SOPS age private key from SSM Parameter Store.
+def fetch_sops_key_ssm(ssm_path: str, *, deadline: float) -> str:
+    """Fetch SOPS age private key from SSM Parameter Store, no later than ``deadline``.
 
     Returns the private key string.
 
     Raises:
         SopsKeyExpired: if the SSM parameter no longer exists (expired by
             the Expiration policy or manually deleted).
+        ExecutionTimedOut: the deadline passed while the key was fetched.
     """
-    ssm = boto3.client("ssm")
+    ssm = boto3.client("ssm", config=boto_config_until(deadline))
     try:
-        resp = ssm.get_parameter(Name=ssm_path, WithDecryption=True)
+        resp = call_until_deadline(
+            lambda: ssm.get_parameter(Name=ssm_path, WithDecryption=True),
+            deadline=deadline,
+            what="fetching the SOPS key from SSM",
+        )
     except ssm.exceptions.ParameterNotFound as exc:
         raise SopsKeyExpired(f"SOPS key at SSM path {ssm_path!r} is missing or expired") from exc
     except ClientError as exc:
@@ -75,11 +85,15 @@ def fetch_sops_key_ssm(ssm_path: str) -> str:
     return resp["Parameter"]["Value"]
 
 
-def delete_sops_key_ssm(ssm_path: str) -> None:
-    """Delete SOPS age private key from SSM (cleanup after job completion)."""
-    ssm = boto3.client("ssm")
-    with contextlib.suppress(ssm.exceptions.ParameterNotFound):
-        ssm.delete_parameter(Name=ssm_path)  # Already expired or deleted if not found
+def delete_sops_key_ssm(ssm_path: str, *, deadline: float) -> None:
+    """Delete SOPS age private key from SSM (cleanup after decryption), no later than ``deadline``."""
+    ssm = boto3.client("ssm", config=boto_config_until(deadline))
+    with contextlib.suppress(ssm.exceptions.ParameterNotFound):  # Already expired or deleted if not found
+        call_until_deadline(
+            lambda: ssm.delete_parameter(Name=ssm_path),
+            deadline=deadline,
+            what="deleting the SOPS key from SSM",
+        )
 
 
 def decrypt_env(
@@ -150,7 +164,8 @@ def handle_sops(
         sops_path: SSM parameter path for the age key (required when
             sops_type="ssm").
         deadline: ``time.monotonic()`` value of the worker's whole-execution
-            deadline; ``sops --decrypt`` is killed when it passes.
+            deadline; the SSM key fetch and delete are abandoned and
+            ``sops --decrypt`` is killed when it passes.
 
     Returns:
         Dict of decrypted env vars, or empty dict if sops_type is None.
@@ -163,9 +178,9 @@ def handle_sops(
     if sops_type == "ssm":
         if not sops_path:
             raise ValueError("sops_path is required when sops_type is 'ssm'")
-        age_key = fetch_sops_key_ssm(sops_path)
+        age_key = fetch_sops_key_ssm(sops_path, deadline=deadline)
         decrypted = decrypt_env(encrypted_path, age_key, deadline=deadline)
-        delete_sops_key_ssm(sops_path)
+        delete_sops_key_ssm(sops_path, deadline=deadline)
         return decrypted
 
     if sops_type == "kms":

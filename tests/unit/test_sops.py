@@ -52,7 +52,7 @@ class TestFetchSopsKeySsm:
         mock_client_factory.return_value = mock_ssm
         mock_ssm.get_parameter.return_value = {"Parameter": {"Value": "AGE-SECRET-KEY-1ABC"}}
 
-        result = fetch_sops_key_ssm("/exe-sys/sops-keys/run-1/000")
+        result = fetch_sops_key_ssm("/exe-sys/sops-keys/run-1/000", deadline=_far())
 
         assert result == "AGE-SECRET-KEY-1ABC"
         mock_ssm.get_parameter.assert_called_once_with(Name="/exe-sys/sops-keys/run-1/000", WithDecryption=True)
@@ -72,7 +72,7 @@ class TestFetchSopsKeySsm:
         )
 
         with pytest.raises(SopsKeyExpired) as exc:
-            fetch_sops_key_ssm("/exe-sys/sops-keys/run-expired/000")
+            fetch_sops_key_ssm("/exe-sys/sops-keys/run-expired/000", deadline=_far())
 
         assert "/exe-sys/sops-keys/run-expired/000" in str(exc.value)
 
@@ -91,7 +91,7 @@ class TestFetchSopsKeySsm:
         )
 
         with pytest.raises(SopsKeyExpired):
-            fetch_sops_key_ssm("/exe-sys/sops-keys/run-1/000")
+            fetch_sops_key_ssm("/exe-sys/sops-keys/run-1/000", deadline=_far())
 
     @patch("aws_exe_sys.common.sops.boto3.client")
     def test_reraises_unexpected_client_error(self, mock_client_factory):
@@ -108,7 +108,7 @@ class TestFetchSopsKeySsm:
         )
 
         with pytest.raises(ClientError, match="InternalError"):
-            fetch_sops_key_ssm("/exe-sys/sops-keys/run-1/000")
+            fetch_sops_key_ssm("/exe-sys/sops-keys/run-1/000", deadline=_far())
 
 
 class TestDeleteSopsKeySsm:
@@ -117,7 +117,7 @@ class TestDeleteSopsKeySsm:
         mock_ssm = MagicMock()
         mock_client_factory.return_value = mock_ssm
 
-        delete_sops_key_ssm("/exe-sys/sops-keys/run-1/000")
+        delete_sops_key_ssm("/exe-sys/sops-keys/run-1/000", deadline=_far())
 
         mock_ssm.delete_parameter.assert_called_once_with(Name="/exe-sys/sops-keys/run-1/000")
 
@@ -136,7 +136,7 @@ class TestDeleteSopsKeySsm:
         )
 
         # Should not raise
-        delete_sops_key_ssm("/exe-sys/sops-keys/run-1/000")
+        delete_sops_key_ssm("/exe-sys/sops-keys/run-1/000", deadline=_far())
 
 
 class TestDecryptEnv:
@@ -221,9 +221,9 @@ class TestHandleSops:
         )
 
         assert result == {"DB_PASS": "secret", "API_KEY": "abc123"}
-        mock_fetch.assert_called_once_with("/exe-sys/sops-keys/run-1/000")
+        mock_fetch.assert_called_once_with("/exe-sys/sops-keys/run-1/000", deadline=deadline)
         mock_decrypt.assert_called_once_with("/tmp/workdir/secrets.enc.json", "AGE-SECRET-KEY-1ABC", deadline=deadline)
-        mock_delete.assert_called_once_with("/exe-sys/sops-keys/run-1/000")
+        mock_delete.assert_called_once_with("/exe-sys/sops-keys/run-1/000", deadline=deadline)
 
     @patch("aws_exe_sys.common.sops.fetch_sops_key_ssm")
     def test_ssm_path_raises_sops_key_expired(self, mock_fetch):

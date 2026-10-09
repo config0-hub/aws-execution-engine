@@ -1,11 +1,16 @@
-"""Subprocess command runner — execute a list of shell commands sequentially."""
+"""Subprocess command runner, and the one execution deadline every blocking call shares."""
 
 from __future__ import annotations
 
 import os
 import signal
 import subprocess
+import threading
 import time
+from typing import Any
+
+from botocore.config import Config
+from botocore.exceptions import ConnectTimeoutError, ReadTimeoutError
 
 from aws_exe_sys.common.result_writer import StepResult
 
@@ -20,6 +25,56 @@ class ExecutionTimedOut(Exception):
     def __init__(self, message: str, steps: list[StepResult]):
         super().__init__(message)
         self.steps = steps
+
+
+def boto_config_until(deadline: float) -> Config:
+    """A botocore ``Config`` whose connect and read timeouts are the time left to ``deadline``.
+
+    A stalled AWS call (headers sent, body withheld) then surfaces as a
+    ``ReadTimeoutError`` at the deadline instead of hanging on botocore's own
+    default timeout; :func:`call_until_deadline` maps it to ExecutionTimedOut.
+    """
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise ExecutionTimedOut("deadline passed", [])
+    return Config(connect_timeout=remaining, read_timeout=remaining)
+
+
+def call_until_deadline(fn, *, deadline: float, what: str) -> Any:
+    """Run the blocking ``fn()`` on a thread and wait for it no later than ``deadline``.
+
+    Every blocking preparation call under the execution deadline goes through
+    here: the package download and extraction, the SSM key fetch and delete,
+    the stale-workspace cleanup. A call that has not returned by the deadline
+    is abandoned (a daemon thread, so it never delays the process exit of the
+    CodeBuild delivery) and ExecutionTimedOut is raised, so the result marker
+    is written at T exactly as for a killed command. A call that returns or
+    raises in time returns or raises here unchanged, except that a botocore
+    connect/read timeout (see :func:`boto_config_until`) is the deadline too.
+    """
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise ExecutionTimedOut(f"deadline passed before {what}", [])
+
+    outcome: dict[str, Any] = {}
+
+    def _target() -> None:
+        try:
+            outcome["value"] = fn()
+        except BaseException as exc:  # noqa: BLE001 - relayed to the calling thread unchanged, never handled here
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=_target, name=f"deadline:{what}", daemon=True)
+    thread.start()
+    thread.join(timeout=remaining)
+    if thread.is_alive():
+        raise ExecutionTimedOut(f"deadline passed while {what}; call abandoned", [])
+    if "error" in outcome:
+        error = outcome["error"]
+        if isinstance(error, (ReadTimeoutError, ConnectTimeoutError)):
+            raise ExecutionTimedOut(f"deadline passed while {what}: {error}", []) from error
+        raise error
+    return outcome["value"]
 
 
 def run_until_deadline(

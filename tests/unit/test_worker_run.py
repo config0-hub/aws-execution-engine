@@ -2,6 +2,7 @@
 
 import base64
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import io
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,7 @@ import pytest
 
 from aws_exe_sys.common.result_writer import ExecutionResult, StepResult
 from aws_exe_sys.common.sops import SopsKeyExpired
+from aws_exe_sys.worker.handler import handler
 from aws_exe_sys.worker.run import cleanup_stale_workdirs, run
 
 
@@ -716,78 +718,144 @@ class TestRunDeadline:
         assert before + 600 <= deadline <= time.monotonic() + 600
 
 
-class _SlowS3Handler(BaseHTTPRequestHandler):
-    """A stand-in S3 endpoint that streams a 2 MiB object slowly (~300 KiB/s)."""
+def _package_zip() -> bytes:
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("run.sh", "echo never\n")
+    return archive.getvalue()
 
-    SIZE = 2 * 1024 * 1024
-    CHUNK = 16 * 1024
+
+class _StalledAwsHandler(BaseHTTPRequestHandler):
+    """A stand-in S3 + SSM endpoint that answers headers at once and withholds bodies.
+
+    S3: HEAD returns the package size; GET sends its headers, then holds the
+    zip body for ``STALL_SECONDS``; PUT records the result marker (time, body).
+    SSM: POST (GetParameter) holds its response for ``STALL_SECONDS``.
+    """
+
+    protocol_version = "HTTP/1.1"  # answers the S3 PUT's Expect: 100-continue at once
+    PACKAGE = _package_zip()
+    STALL_SECONDS = 6.0
+    STALL_GET = False
+    STALL_SSM = False
+    markers: list[tuple[float, dict]] = []
 
     def log_message(self, *_args):  # keep pytest output clean
         pass
 
-    def _headers(self):
+    def _package_headers(self):
         self.send_response(200)
-        self.send_header("Content-Length", str(self.SIZE))
+        self.send_header("Content-Length", str(len(self.PACKAGE)))
         self.send_header("Content-Type", "application/zip")
         self.end_headers()
 
     def do_HEAD(self):
-        self._headers()
+        self._package_headers()
 
     def do_GET(self):
-        self._headers()
-        sent = 0
-        while sent < self.SIZE:
-            try:
-                self.wfile.write(b"\0" * self.CHUNK)
-                self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
-                return
-            sent += self.CHUNK
-            time.sleep(0.05)
+        self._package_headers()
+        if self.STALL_GET:
+            time.sleep(self.STALL_SECONDS)
+        try:
+            self.wfile.write(self.PACKAGE)
+        except (BrokenPipeError, ConnectionResetError):
+            return
+
+    def do_PUT(self):
+        body = self.rfile.read(int(self.headers["Content-Length"]))
+        self.markers.append((time.monotonic(), json.loads(body)))
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        if self.STALL_SSM:
+            time.sleep(self.STALL_SECONDS)
+        body = b'{"Parameter": {"Value": "AGE-SECRET-KEY-1TEST"}}'
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-amz-json-1.1")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            return
 
 
 @pytest.fixture
-def slow_s3(monkeypatch):
-    """Point boto3's S3 client at the slow stand-in over real HTTP."""
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _SlowS3Handler)
+def stalled_aws(monkeypatch):
+    """Point boto3's S3 and SSM clients at the stalling stand-in over real HTTP."""
+    _StalledAwsHandler.markers = []
+    _StalledAwsHandler.STALL_GET = False
+    _StalledAwsHandler.STALL_SSM = False
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _StalledAwsHandler)
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    monkeypatch.setenv("AWS_ENDPOINT_URL_S3", f"http://127.0.0.1:{server.server_port}")
+    endpoint = f"http://127.0.0.1:{server.server_port}"
+    monkeypatch.setenv("AWS_ENDPOINT_URL_S3", endpoint)
+    monkeypatch.setenv("AWS_ENDPOINT_URL_SSM", endpoint)
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test")
     monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
-    yield server
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+    yield _StalledAwsHandler
     server.shutdown()
 
 
-class TestRunDeadlineCoversPreparation:
-    """T covers package fetch and SOPS decrypt, not only the commands: a real
-    slow download or a real hung ``sops`` yields the timed-out ``failed``
-    marker at T, with no step run."""
+def _handler_event(**overrides) -> dict:
+    event = {
+        "trigger_id": "t-stalled",
+        "s3_package_uri": "s3://pkg-bucket/exec/stalled.zip",
+        "sops_type": None,
+        "sops_path": None,
+        "commands_b64": _encode_commands(["echo never"]),
+        "done_endpoint": DONE_ENDPOINT,
+        "execution_target": "lambda",
+        "timeout_seconds": 1,
+    }
+    event.update(overrides)
+    return event
 
-    @patch("aws_exe_sys.worker.run.write_result")
-    def test_slow_package_download_is_aborted_at_timeout(self, mock_write, slow_s3):
+
+class TestRunDeadlineCoversPreparation:
+    """T covers every blocking preparation call, not only the commands: a
+    stalled S3 GET (headers sent, body withheld), a stalled SSM GetParameter or
+    a hung ``sops`` yields the timed-out ``failed`` marker at T, with no step
+    run. The two stalled cases go through the real handler and the real
+    ``write_result`` PUT, so the marker's arrival time is what is measured."""
+
+    MARKER_WITHIN_SECONDS = 3  # T=1 plus the reserve for the result write; the body is held for 6
+
+    def test_stalled_package_download_writes_the_marker_at_timeout(self, stalled_aws):
+        stalled_aws.STALL_GET = True
         started = time.monotonic()
 
-        status = run(
-            trigger_id="t-slow-fetch",
-            s3_package_uri="s3://pkg-bucket/exec/slow.zip",
-            sops_type=None,
-            sops_path=None,
-            commands_b64=_encode_commands(["echo never"]),
-            done_endpoint=DONE_ENDPOINT,
-            execution_target="lambda",
-            timeout_seconds=1,
-        )
+        response = handler(_handler_event())
 
-        assert time.monotonic() - started < 6, "download ran past the deadline"
-        assert status == "failed"
-        result_arg = mock_write.call_args[0][1]
-        assert result_arg.status == "failed"
-        assert result_arg.error.startswith("execution timed out at 1 seconds")
-        assert "fetching the package" in result_arg.error
-        assert result_arg.steps == []
+        assert response == {"status": "failed"}
+        assert len(stalled_aws.markers) == 1
+        written_at, marker = stalled_aws.markers[0]
+        assert written_at - started < self.MARKER_WITHIN_SECONDS, "marker waited for the withheld body"
+        assert marker["status"] == "failed"
+        assert marker["error"].startswith("execution timed out at 1 seconds")
+        assert "fetching the package" in marker["error"]
+        assert marker["steps"] == []
+
+    def test_stalled_ssm_key_fetch_writes_the_marker_at_timeout(self, stalled_aws):
+        stalled_aws.STALL_SSM = True
+        started = time.monotonic()
+
+        response = handler(_handler_event(sops_type="ssm", sops_path="/exe-sys/sops-keys/t-stalled"))
+
+        assert response == {"status": "failed"}
+        assert len(stalled_aws.markers) == 1
+        written_at, marker = stalled_aws.markers[0]
+        assert written_at - started < self.MARKER_WITHIN_SECONDS, "marker waited for the withheld SSM response"
+        assert marker["status"] == "failed"
+        assert marker["error"].startswith("execution timed out at 1 seconds")
+        assert "fetching the SOPS key from SSM" in marker["error"]
+        assert marker["steps"] == []
 
     @patch("aws_exe_sys.worker.run.write_result")
     @patch("aws_exe_sys.worker.run.fetch_code_s3")
