@@ -25,8 +25,9 @@ class TestAsyncRetriesAreOff:
         source = LAMBDAS_TERRAFORM.read_text()
         for name in ("init_job", "worker"):
             block = _resource_block(source, "aws_lambda_function_event_invoke_config", name)
-            assert f"function_name          = aws_lambda_function.{name}.function_name" in block
-            assert "maximum_retry_attempts = 0" in block
+            assert f"function_name                = aws_lambda_function.{name}.function_name" in block
+            assert "maximum_event_age_in_seconds = 60" in block
+            assert "maximum_retry_attempts       = 0" in block
             assert "on_failure {" in block
             assert "destination = aws_sqs_queue.lambda_failures.arn" in block
             assert "on_success" not in block

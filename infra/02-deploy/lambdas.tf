@@ -94,15 +94,18 @@ resource "aws_lambda_function" "worker" {
 # 0 for both engine Lambdas. A Lambda that dies anyway (crash, out of memory,
 # function timeout) is reported to the failures queue so people can see the
 # death; the order itself is failed by its caller when no result marker
-# arrives. Nothing consumes the queue on the order's behalf.
+# arrives. Nothing consumes the queue on the order's behalf. An async invoke
+# the Lambda service cannot start within 60 seconds is reported there too,
+# not started later against an order its caller has already failed.
 
 resource "aws_sqs_queue" "lambda_failures" {
   name = "${local.prefix}-lambda-failures"
 }
 
 resource "aws_lambda_function_event_invoke_config" "init_job" {
-  function_name          = aws_lambda_function.init_job.function_name
-  maximum_retry_attempts = 0
+  function_name                = aws_lambda_function.init_job.function_name
+  maximum_event_age_in_seconds = 60
+  maximum_retry_attempts       = 0
 
   destination_config {
     on_failure {
@@ -112,8 +115,9 @@ resource "aws_lambda_function_event_invoke_config" "init_job" {
 }
 
 resource "aws_lambda_function_event_invoke_config" "worker" {
-  function_name          = aws_lambda_function.worker.function_name
-  maximum_retry_attempts = 0
+  function_name                = aws_lambda_function.worker.function_name
+  maximum_event_age_in_seconds = 60
+  maximum_retry_attempts       = 0
 
   destination_config {
     on_failure {
