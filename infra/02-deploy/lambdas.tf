@@ -70,7 +70,10 @@ resource "aws_lambda_function" "worker" {
     command     = ["aws_exe_sys.worker.handler.handler"]
   }
 
-  timeout     = local.default_lambda_timeout > 0 ? local.default_lambda_timeout : 600
+  # 900 is the AWS upper bound: the last layer, never reached. The payload's
+  # timeout_seconds (T, at most 800 for the lambda target) is the clock that
+  # ends the work; the worker kills the run and writes the result at T.
+  timeout     = local.default_lambda_timeout > 0 ? local.default_lambda_timeout : 900
   memory_size = local.default_lambda_memory > 0 ? local.default_lambda_memory : 2048
 
   # Commands may unpack large caller-provided packages and their dependencies.
@@ -80,5 +83,45 @@ resource "aws_lambda_function" "worker" {
 
   environment {
     variables = local.lambda_env
+  }
+}
+
+# --- Async invoke policy: AWS never re-invokes a dead engine Lambda. ---
+#
+# init_job invokes the worker with InvocationType=Event; the Lambda service
+# would retry a failed async invoke twice by default, re-running work the
+# order already fired. The run-cycle contract's timeout rule sets retries to
+# 0 for both engine Lambdas. A Lambda that dies anyway (crash, out of memory,
+# function timeout) is reported to the failures queue so people can see the
+# death; the order itself is failed by its caller when no result marker
+# arrives. Nothing consumes the queue on the order's behalf. An async invoke
+# the Lambda service cannot start within 60 seconds is reported there too,
+# not started later against an order its caller has already failed.
+
+resource "aws_sqs_queue" "lambda_failures" {
+  name = "${local.prefix}-lambda-failures"
+}
+
+resource "aws_lambda_function_event_invoke_config" "init_job" {
+  function_name                = aws_lambda_function.init_job.function_name
+  maximum_event_age_in_seconds = 60
+  maximum_retry_attempts       = 0
+
+  destination_config {
+    on_failure {
+      destination = aws_sqs_queue.lambda_failures.arn
+    }
+  }
+}
+
+resource "aws_lambda_function_event_invoke_config" "worker" {
+  function_name                = aws_lambda_function.worker.function_name
+  maximum_event_age_in_seconds = 60
+  maximum_retry_attempts       = 0
+
+  destination_config {
+    on_failure {
+      destination = aws_sqs_queue.lambda_failures.arn
+    }
   }
 }

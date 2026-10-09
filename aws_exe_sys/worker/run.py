@@ -17,12 +17,18 @@ import zipfile
 from aws_exe_sys.common.callback import post_callback
 from aws_exe_sys.common.result_writer import ExecutionResult, write_result
 from aws_exe_sys.common.sops import SopsKeyExpired, handle_sops
-from aws_exe_sys.common.subprocess_runner import run_commands
+from aws_exe_sys.common.subprocess_runner import (
+    ExecutionTimedOut,
+    boto_config_until,
+    run_commands,
+    until_deadline,
+)
 
 logger = logging.getLogger(__name__)
 
 _SCRATCH_ROOT_NAME = "aws-exe-sys-worker"
 _WORKDIR_PREFIX = "run-"
+_PACKAGE_CHUNK_BYTES = 1 << 20
 
 
 def _scratch_root() -> Path:
@@ -30,18 +36,29 @@ def _scratch_root() -> Path:
     return Path(tempfile.gettempdir()) / _SCRATCH_ROOT_NAME
 
 
-def cleanup_stale_workdirs() -> None:
-    """Remove stale worker-owned run directories from the scratch root."""
+def cleanup_stale_workdirs(*, deadline: float) -> None:
+    """Remove stale worker-owned run directories from the scratch root, no later than ``deadline``."""
     scratch_root = _scratch_root()
     scratch_root.mkdir(parents=True, exist_ok=True)
 
     for path in scratch_root.iterdir():
+        if time.monotonic() >= deadline:
+            raise ExecutionTimedOut("deadline passed while cleaning stale workspaces", [])
         if path.name.startswith(_WORKDIR_PREFIX) and not path.is_symlink() and path.is_dir():
             shutil.rmtree(path)
 
 
-def fetch_code_s3(s3_location: str) -> str:
-    """Download and extract a zip from S3. Returns path to extracted directory."""
+def fetch_code_s3(s3_location: str, *, deadline: float) -> str:
+    """Download and extract a zip from S3 under the execution deadline.
+
+    Returns the path to the extracted directory. The package is one GetObject
+    whose body is read in the calling thread, chunk by chunk, on a client
+    whose connect/read timeouts are the time left and whose retries are off
+    (:func:`boto_config_until`): a stalled read raises at ``deadline`` as
+    :class:`ExecutionTimedOut` (:func:`until_deadline`), and nothing is
+    started that the process would wait for at exit. Extraction checks the
+    deadline between members.
+    """
     import boto3
 
     scratch_root = _scratch_root()
@@ -52,11 +69,19 @@ def fetch_code_s3(s3_location: str) -> str:
     key = parts[1] if len(parts) > 1 else ""
 
     local_zip = os.path.join(work_dir, "code.zip")
-    s3_client = boto3.client("s3")
-    s3_client.download_file(bucket, key, local_zip)
+    s3_client = boto3.client("s3", config=boto_config_until(deadline))
+    with until_deadline("fetching the package"), open(local_zip, "wb") as out:
+        body = s3_client.get_object(Bucket=bucket, Key=key)["Body"]
+        while chunk := body.read(_PACKAGE_CHUNK_BYTES):
+            if time.monotonic() >= deadline:
+                raise ExecutionTimedOut("deadline passed while fetching the package", [])
+            out.write(chunk)
 
     with zipfile.ZipFile(local_zip, "r") as zf:
-        zf.extractall(work_dir)
+        for member in zf.infolist():
+            if time.monotonic() >= deadline:
+                raise ExecutionTimedOut("deadline passed while extracting the package", [])
+            zf.extract(member, work_dir)
     os.unlink(local_zip)
     return work_dir
 
@@ -69,6 +94,7 @@ def run(
     commands_b64: str,
     done_endpoint: str,
     execution_target: str,
+    timeout_seconds: int,
     callback_url: str | None = None,
     callback_token: str | None = None,
 ) -> str:
@@ -84,22 +110,30 @@ def run(
         7. ALWAYS write_result to done_endpoint (even on failure)
         8. If callback_url is set, best-effort POST the result (log-only on failure)
 
+    ``timeout_seconds`` is the payload's T: one deadline for the whole run,
+    counted from entry and enforced at every stage: every blocking preparation
+    call (workspace cleanup, package download and extraction, the SSM key
+    fetch and delete) ends at the deadline in the calling thread, ``sops
+    --decrypt`` and the running command are killed with their process groups.
+    The result is then ``failed`` with an error that names T.
+
     Returns the final status string ("succeeded" or "failed").
     """
     started_at = time.monotonic()
+    deadline = started_at + timeout_seconds
     result: ExecutionResult | None = None
 
     try:
         # 1. Remove workspaces left by earlier warm-container invocations.
-        cleanup_stale_workdirs()
+        cleanup_stale_workdirs(deadline=deadline)
 
         # 2. Download and extract code package
-        work_dir = fetch_code_s3(s3_package_uri)
+        work_dir = fetch_code_s3(s3_package_uri, deadline=deadline)
 
         # 3. Decrypt SOPS secrets if configured
         env_vars: dict[str, str] = {}
         if sops_type is not None:
-            env_vars = handle_sops(work_dir, sops_type=sops_type, sops_path=sops_path)
+            env_vars = handle_sops(work_dir, sops_type=sops_type, sops_path=sops_path, deadline=deadline)
 
         # 4. Decode commands
         commands: list[str] = json.loads(base64.b64decode(commands_b64))
@@ -116,7 +150,7 @@ def run(
             proc_env.pop("AWS_SESSION_TOKEN", None)
 
         # 6. Execute commands
-        steps = run_commands(commands, env=proc_env, work_dir=work_dir)
+        steps = run_commands(commands, env=proc_env, work_dir=work_dir, deadline=deadline)
 
         # 7. Determine overall status
         if steps and all(s.status == "succeeded" for s in steps):
@@ -128,6 +162,15 @@ def run(
             trigger_id=trigger_id,
             status=status,
             steps=steps,
+        )
+
+    except ExecutionTimedOut as exc:
+        logger.error("Execution timed out at %ss: %s", timeout_seconds, exc)
+        result = ExecutionResult(
+            trigger_id=trigger_id,
+            status="failed",
+            steps=exc.steps,
+            error=f"execution timed out at {timeout_seconds} seconds: {exc}",
         )
 
     except SopsKeyExpired as exc:

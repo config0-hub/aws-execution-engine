@@ -3,9 +3,10 @@
 Exercises: handler() → SimplePayload.from_dict() → validate() → run() →
 fetch_code_s3() → handle_sops() → run_commands() → write_result().
 
-AWS SDK calls (S3 download/upload, SSM get_parameter) are mocked at the
-boto3.client level.  SOPS CLI is mocked via subprocess.  run_commands()
-executes REAL shell commands — that's the integration boundary.
+AWS SDK calls (S3 get_object/put_object, SSM get_parameter) are mocked at the
+boto3.client level.  The SOPS CLI is a stand-in ``sops`` script placed first
+on PATH.  run_commands() executes REAL shell commands — that's the
+integration boundary.
 
 Note: worker/run.py imports boto3 lazily inside fetch_code_s3(), so we
 cannot patch "aws_exe_sys.worker.run.boto3".  Instead we patch
@@ -13,8 +14,11 @@ cannot patch "aws_exe_sys.worker.run.boto3".  Instead we patch
 """
 
 import base64
+import io
 import json
-import shutil
+import os
+from pathlib import Path
+import stat
 from unittest.mock import MagicMock, patch
 import urllib.error
 import zipfile
@@ -74,11 +78,44 @@ def code_zip_with_secrets(tmp_path):
     return str(zip_path)
 
 
-def _mock_s3_download(zip_path: str):
-    """Return a side_effect for s3.download_file that copies the real zip."""
-    def _download(Bucket, Key, Filename):
-        shutil.copy2(zip_path, Filename)
-    return _download
+def _mock_s3_get_object(zip_path: str):
+    """Return a side_effect for s3.get_object whose Body streams the real zip."""
+    def _get_object(Bucket, Key):
+        return {"Body": io.BytesIO(Path(zip_path).read_bytes())}
+    return _get_object
+
+
+@pytest.fixture
+def fake_sops(tmp_path, monkeypatch):
+    """Install a stand-in ``sops`` first on PATH.
+
+    The returned function sets the JSON the stand-in prints. Every invocation
+    appends its argv to ``sops.args``; the stand-in refuses (exit 3) when
+    SOPS_AGE_KEY or SOPS_AGE_KEY_FILE is set and ``sops.expect_no_age_key``
+    exists, so a test can assert the KMS path passed no age key.
+    """
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    args_log = tmp_path / "sops.args"
+    output_file = tmp_path / "sops.out"
+    no_age_key_flag = tmp_path / "sops.expect_no_age_key"
+    script = fake_bin / "sops"
+    script.write_text(
+        "#!/bin/sh\n"
+        f'echo "$@" >> "{args_log}"\n'
+        f'if [ -e "{no_age_key_flag}" ] && [ -n "$SOPS_AGE_KEY$SOPS_AGE_KEY_FILE" ]; then exit 3; fi\n'
+        f'cat "{output_file}"\n'
+    )
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
+
+    def _configure(decrypted: dict, *, expect_no_age_key: bool = False) -> dict:
+        output_file.write_text(json.dumps(decrypted))
+        if expect_no_age_key:
+            no_age_key_flag.touch()
+        return {"args": args_log}
+
+    return _configure
 
 
 def _make_boto3_dispatcher(service_mocks: dict):
@@ -95,7 +132,7 @@ class TestWorkerHappyPath:
 
     def test_echo_command_succeeds(self, code_zip):
         mock_s3 = MagicMock()
-        mock_s3.download_file.side_effect = _mock_s3_download(code_zip)
+        mock_s3.get_object.side_effect = _mock_s3_get_object(code_zip)
         mock_s3.put_object.return_value = {}
 
         with patch("boto3.client", side_effect=_make_boto3_dispatcher({"s3": mock_s3})):
@@ -116,7 +153,7 @@ class TestWorkerHappyPath:
 
     def test_multiple_commands_succeed(self, code_zip):
         mock_s3 = MagicMock()
-        mock_s3.download_file.side_effect = _mock_s3_download(code_zip)
+        mock_s3.get_object.side_effect = _mock_s3_get_object(code_zip)
         mock_s3.put_object.return_value = {}
 
         with patch("boto3.client", side_effect=_make_boto3_dispatcher({"s3": mock_s3})):
@@ -136,7 +173,7 @@ class TestWorkerCallback:
 
     def test_callback_posted_with_bearer_token_after_marker_write(self, code_zip):
         mock_s3 = MagicMock()
-        mock_s3.download_file.side_effect = _mock_s3_download(code_zip)
+        mock_s3.get_object.side_effect = _mock_s3_get_object(code_zip)
         mock_s3.put_object.return_value = {}
 
         with (
@@ -162,7 +199,7 @@ class TestWorkerCallback:
 
     def test_absent_callback_url_no_post_attempted(self, code_zip):
         mock_s3 = MagicMock()
-        mock_s3.download_file.side_effect = _mock_s3_download(code_zip)
+        mock_s3.get_object.side_effect = _mock_s3_get_object(code_zip)
         mock_s3.put_object.return_value = {}
 
         with (
@@ -176,7 +213,7 @@ class TestWorkerCallback:
 
     def test_callback_post_failure_does_not_affect_execution_result(self, code_zip):
         mock_s3 = MagicMock()
-        mock_s3.download_file.side_effect = _mock_s3_download(code_zip)
+        mock_s3.get_object.side_effect = _mock_s3_get_object(code_zip)
         mock_s3.put_object.return_value = {}
 
         with (
@@ -200,9 +237,9 @@ class TestWorkerCallback:
 class TestWorkerSopsSSMPath:
     """age + SSM path: fetch key from SSM, decrypt secrets, run commands."""
 
-    def test_ssm_sops_happy_path(self, code_zip_with_secrets):
+    def test_ssm_sops_happy_path(self, code_zip_with_secrets, fake_sops):
         mock_s3 = MagicMock()
-        mock_s3.download_file.side_effect = _mock_s3_download(code_zip_with_secrets)
+        mock_s3.get_object.side_effect = _mock_s3_get_object(code_zip_with_secrets)
         mock_s3.put_object.return_value = {}
 
         mock_ssm = MagicMock()
@@ -212,16 +249,10 @@ class TestWorkerSopsSSMPath:
         mock_ssm.exceptions.ParameterNotFound = type("ParameterNotFound", (Exception,), {})
         mock_ssm.delete_parameter.return_value = {}
 
-        fake_decrypted = json.dumps({"MY_SECRET": "decrypted-value"})
+        sops_calls = fake_sops({"MY_SECRET": "decrypted-value"})
 
         with patch("boto3.client", side_effect=_make_boto3_dispatcher({
-                    "s3": mock_s3, "ssm": mock_ssm})), \
-             patch("aws_exe_sys.common.sops.subprocess.run") as mock_sops_proc:
-
-            mock_sops_proc.return_value = MagicMock(
-                returncode=0, stdout=fake_decrypted, stderr=""
-            )
-
+                    "s3": mock_s3, "ssm": mock_ssm})):
             result = handler(_valid_event(
                 sops_type="ssm",
                 sops_path="/exe-sys/sops-keys/run1/001",
@@ -232,33 +263,28 @@ class TestWorkerSopsSSMPath:
         mock_ssm.get_parameter.assert_called_once_with(
             Name="/exe-sys/sops-keys/run1/001", WithDecryption=True
         )
-        mock_sops_proc.assert_called_once()
-        sops_cmd = mock_sops_proc.call_args[0][0]
-        assert "sops" in sops_cmd
-        assert "--decrypt" in sops_cmd
+        sops_invocations = sops_calls["args"].read_text().splitlines()
+        assert len(sops_invocations) == 1
+        assert "--decrypt" in sops_invocations[0]
 
         put_kwargs = mock_s3.put_object.call_args[1]
         body = json.loads(put_kwargs["Body"].decode())
         assert body["status"] == "succeeded"
+        assert "decrypted-value" in body["steps"][0]["output"]
 
 
 class TestWorkerSopsKMSPath:
     """KMS path: SOPS decrypts using KMS ARN embedded in file metadata."""
 
-    def test_kms_sops_happy_path(self, code_zip_with_secrets):
+    def test_kms_sops_happy_path(self, code_zip_with_secrets, fake_sops):
         mock_s3 = MagicMock()
-        mock_s3.download_file.side_effect = _mock_s3_download(code_zip_with_secrets)
+        mock_s3.get_object.side_effect = _mock_s3_get_object(code_zip_with_secrets)
         mock_s3.put_object.return_value = {}
 
-        fake_decrypted = json.dumps({"KMS_SECRET": "kms-decrypted"})
+        # The stand-in exits 3 if the KMS path passes SOPS_AGE_KEY or SOPS_AGE_KEY_FILE.
+        sops_calls = fake_sops({"KMS_SECRET": "kms-decrypted"}, expect_no_age_key=True)
 
-        with patch("boto3.client", side_effect=_make_boto3_dispatcher({"s3": mock_s3})), \
-             patch("aws_exe_sys.common.sops.subprocess.run") as mock_sops_proc:
-
-            mock_sops_proc.return_value = MagicMock(
-                returncode=0, stdout=fake_decrypted, stderr=""
-            )
-
+        with patch("boto3.client", side_effect=_make_boto3_dispatcher({"s3": mock_s3})):
             result = handler(_valid_event(
                 sops_type="kms",
                 sops_path=None,
@@ -266,24 +292,20 @@ class TestWorkerSopsKMSPath:
             ))
 
         assert result["status"] == "succeeded"
-        mock_sops_proc.assert_called_once()
-        # KMS path should NOT set SOPS_AGE_KEY or SOPS_AGE_KEY_FILE
-        sops_env = mock_sops_proc.call_args[1].get("env", {})
-        assert "SOPS_AGE_KEY" not in sops_env
-        assert "SOPS_AGE_KEY_FILE" not in sops_env
+        assert len(sops_calls["args"].read_text().splitlines()) == 1
 
 
 class TestWorkerNoEncryption:
     """No encryption path: sops_type=None, skip SOPS entirely."""
 
-    def test_no_sops_skips_decryption(self, code_zip):
+    def test_no_sops_skips_decryption(self, code_zip, fake_sops):
         mock_s3 = MagicMock()
-        mock_s3.download_file.side_effect = _mock_s3_download(code_zip)
+        mock_s3.get_object.side_effect = _mock_s3_get_object(code_zip)
         mock_s3.put_object.return_value = {}
 
-        with patch("boto3.client", side_effect=_make_boto3_dispatcher({"s3": mock_s3})), \
-             patch("aws_exe_sys.common.sops.subprocess.run") as mock_sops_proc:
+        sops_calls = fake_sops({"NEVER": "used"})
 
+        with patch("boto3.client", side_effect=_make_boto3_dispatcher({"s3": mock_s3})):
             result = handler(_valid_event(
                 sops_type=None,
                 sops_path=None,
@@ -291,7 +313,7 @@ class TestWorkerNoEncryption:
             ))
 
         assert result["status"] == "succeeded"
-        mock_sops_proc.assert_not_called()
+        assert not sops_calls["args"].exists()
 
 
 class TestWorkerS3DownloadFailure:
@@ -299,7 +321,7 @@ class TestWorkerS3DownloadFailure:
 
     def test_download_failure_writes_failed_result(self):
         mock_s3 = MagicMock()
-        mock_s3.download_file.side_effect = Exception("NoSuchKey: bucket not found")
+        mock_s3.get_object.side_effect = Exception("NoSuchKey: bucket not found")
         mock_s3.put_object.return_value = {}
 
         with patch("boto3.client", side_effect=_make_boto3_dispatcher({"s3": mock_s3})):
@@ -319,7 +341,7 @@ class TestWorkerSopsKeyExpired:
 
     def test_expired_key_writes_sops_key_expired_error(self, code_zip_with_secrets):
         mock_s3 = MagicMock()
-        mock_s3.download_file.side_effect = _mock_s3_download(code_zip_with_secrets)
+        mock_s3.get_object.side_effect = _mock_s3_get_object(code_zip_with_secrets)
         mock_s3.put_object.return_value = {}
 
         mock_ssm = MagicMock()
@@ -346,7 +368,7 @@ class TestWorkerCommandFailure:
 
     def test_first_command_fails(self, code_zip):
         mock_s3 = MagicMock()
-        mock_s3.download_file.side_effect = _mock_s3_download(code_zip)
+        mock_s3.get_object.side_effect = _mock_s3_get_object(code_zip)
         mock_s3.put_object.return_value = {}
 
         with patch("boto3.client", side_effect=_make_boto3_dispatcher({"s3": mock_s3})):
@@ -364,7 +386,7 @@ class TestWorkerCommandFailure:
 
     def test_second_command_fails_with_partial_steps(self, code_zip):
         mock_s3 = MagicMock()
-        mock_s3.download_file.side_effect = _mock_s3_download(code_zip)
+        mock_s3.get_object.side_effect = _mock_s3_get_object(code_zip)
         mock_s3.put_object.return_value = {}
 
         with patch("boto3.client", side_effect=_make_boto3_dispatcher({"s3": mock_s3})):
@@ -388,7 +410,7 @@ class TestWorkerAlwaysWritesResult:
 
     def test_result_written_on_download_failure(self):
         mock_s3 = MagicMock()
-        mock_s3.download_file.side_effect = Exception("boom")
+        mock_s3.get_object.side_effect = Exception("boom")
         mock_s3.put_object.return_value = {}
 
         with patch("boto3.client", side_effect=_make_boto3_dispatcher({"s3": mock_s3})):
@@ -398,7 +420,7 @@ class TestWorkerAlwaysWritesResult:
 
     def test_result_written_on_success(self, code_zip):
         mock_s3 = MagicMock()
-        mock_s3.download_file.side_effect = _mock_s3_download(code_zip)
+        mock_s3.get_object.side_effect = _mock_s3_get_object(code_zip)
         mock_s3.put_object.return_value = {}
 
         with patch("boto3.client", side_effect=_make_boto3_dispatcher({"s3": mock_s3})):

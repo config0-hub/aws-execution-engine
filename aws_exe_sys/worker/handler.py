@@ -44,7 +44,7 @@ def _write_prerun_failure(payload_dict: dict[str, Any], error_msg: str) -> None:
 
 
 def handler(event: dict[str, Any], context: Any = None) -> dict:
-    """Lambda handler — extract 7-field payload and call run().
+    """Lambda handler — extract the payload and call run().
 
     Parse, validate, and run are wrapped so a pre-run failure STILL writes a
     ``failed`` ExecutionResult to ``done_endpoint`` via the handler-level
@@ -68,6 +68,7 @@ def handler(event: dict[str, Any], context: Any = None) -> dict:
             commands_b64=payload.commands_b64,
             done_endpoint=payload.done_endpoint,
             execution_target=payload.execution_target,
+            timeout_seconds=payload.timeout_seconds,
             callback_url=payload.callback_url,
             callback_token=payload.callback_token,
         )
@@ -104,6 +105,7 @@ if __name__ == "__main__":
         commands_b64=payload.commands_b64,
         done_endpoint=payload.done_endpoint,
         execution_target=payload.execution_target,
+        timeout_seconds=payload.timeout_seconds,
         callback_url=payload.callback_url,
         callback_token=payload.callback_token,
     )

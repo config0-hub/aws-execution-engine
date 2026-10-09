@@ -54,6 +54,11 @@ terraform apply
 By default, deployed roles read packages from `<project_prefix>-internal` and write results to
 `<project_prefix>-done`. Configure the additional bucket ARN lists when payloads use other buckets.
 
+`init_job` and `worker` each carry an `aws_lambda_function_event_invoke_config` with
+`maximum_retry_attempts = 0`: the Lambda service never re-invokes a dead engine Lambda. A Lambda
+that dies anyway is reported to the `<project_prefix>-lambda-failures` SQS queue, for people to
+see; the caller fails its own order when no result marker arrives.
+
 Create the tenant ECR repo (`task ecr:apply`) and mirror the published image into it (`task ecr:mirror`) before a CodeBuild execution target that consumes the image from this account.
 
 ## CodeBuild orchestration

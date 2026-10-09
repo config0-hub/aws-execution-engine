@@ -1,16 +1,24 @@
 """Unit tests for aws_exe_sys/worker/run.py — simplified single-entrypoint worker."""
 
 import base64
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import io
 import json
 import os
 from pathlib import Path
-from unittest.mock import patch
+import stat
+import subprocess
+import sys
+import threading
+import time
+from unittest.mock import ANY, patch
 import zipfile
 
 import pytest
 
 from aws_exe_sys.common.result_writer import ExecutionResult, StepResult
 from aws_exe_sys.common.sops import SopsKeyExpired
+from aws_exe_sys.worker.handler import handler
 from aws_exe_sys.worker.run import cleanup_stale_workdirs, run
 
 
@@ -46,7 +54,7 @@ class TestScratchCleanup:
         outside_file.write_text("outside the worker scratch root")
         (owned_first / "provider-cache").write_text("stale")
 
-        cleanup_stale_workdirs()
+        cleanup_stale_workdirs(deadline=time.monotonic() + 60)
 
         assert not owned_first.exists()
         assert not owned_second.exists()
@@ -68,7 +76,7 @@ class TestScratchCleanup:
         mock_rmtree.side_effect = OSError("cleanup denied")
 
         with pytest.raises(OSError, match="cleanup denied"):
-            cleanup_stale_workdirs()
+            cleanup_stale_workdirs(deadline=time.monotonic() + 60)
 
     @patch("aws_exe_sys.worker.run.write_result")
     @patch("aws_exe_sys.worker.run.run_commands")
@@ -89,19 +97,22 @@ class TestScratchCleanup:
         foreign_file.write_text("keep")
         workdirs: list[Path] = []
 
-        def download_zip(bucket: str, key: str, destination: str) -> None:
-            assert bucket == "bucket"
-            assert key == "exec.zip"
-            with zipfile.ZipFile(destination, "w") as archive:
-                archive.writestr("package.txt", "package")
+        def get_package(Bucket: str, Key: str) -> dict:
+            assert Bucket == "bucket"
+            assert Key == "exec.zip"
+            archive = io.BytesIO()
+            with zipfile.ZipFile(archive, "w") as zf:
+                zf.writestr("package.txt", "package")
+            return {"Body": io.BytesIO(archive.getvalue())}
 
         def execute_commands(
             commands: list[str],
             *,
             env: dict[str, str],
             work_dir: str,
+            deadline: float,
         ) -> list[StepResult]:
-            del commands, env
+            del commands, env, deadline
             current_workdir = Path(work_dir)
             if workdirs:
                 assert not workdirs[0].exists()
@@ -119,7 +130,7 @@ class TestScratchCleanup:
                 ),
             ]
 
-        mock_boto_client.return_value.download_file.side_effect = download_zip
+        mock_boto_client.return_value.get_object.side_effect = get_package
         mock_run_commands.side_effect = execute_commands
 
         for trigger_id in ("first", "second"):
@@ -131,6 +142,7 @@ class TestScratchCleanup:
                 commands_b64=_encode_commands(["echo ok"]),
                 done_endpoint=DONE_ENDPOINT,
                 execution_target="lambda",
+                timeout_seconds=3600,
             )
             assert status == "succeeded"
 
@@ -159,6 +171,7 @@ class TestScratchCleanup:
             commands_b64=_encode_commands(["echo never"]),
             done_endpoint=DONE_ENDPOINT,
             execution_target="lambda",
+            timeout_seconds=3600,
         )
 
         assert status == "failed"
@@ -197,11 +210,12 @@ class TestRunHappyPath:
             commands_b64=_encode_commands(["echo hello"]),
             done_endpoint=DONE_ENDPOINT,
             execution_target="lambda",
+            timeout_seconds=3600,
         )
 
         assert status == "succeeded"
-        mock_fetch.assert_called_once_with("s3://bucket/exec.zip")
-        mock_sops.assert_called_once_with("/tmp/work", sops_type="ssm", sops_path="/sops/key/path")
+        mock_fetch.assert_called_once_with("s3://bucket/exec.zip", deadline=ANY)
+        mock_sops.assert_called_once_with("/tmp/work", sops_type="ssm", sops_path="/sops/key/path", deadline=ANY)
         mock_run_cmds.assert_called_once()
         mock_write.assert_called_once()
         result_arg = mock_write.call_args[0][1]
@@ -233,6 +247,7 @@ class TestRunHappyPath:
             commands_b64=_encode_commands(["echo hi"]),
             done_endpoint=DONE_ENDPOINT,
             execution_target="codebuild",
+            timeout_seconds=3600,
         )
 
         assert status == "succeeded"
@@ -265,6 +280,7 @@ class TestRunHappyPath:
             commands_b64=_encode_commands(["echo test"]),
             done_endpoint=DONE_ENDPOINT,
             execution_target="lambda",
+            timeout_seconds=3600,
         )
 
         # Check that env dict passed to run_commands includes the SOPS var
@@ -293,6 +309,7 @@ class TestRunS3DownloadFail:
             commands_b64=_encode_commands(["echo never"]),
             done_endpoint=DONE_ENDPOINT,
             execution_target="lambda",
+            timeout_seconds=3600,
         )
 
         assert status == "failed"
@@ -327,6 +344,7 @@ class TestRunSopsFail:
             commands_b64=_encode_commands(["echo never"]),
             done_endpoint=DONE_ENDPOINT,
             execution_target="lambda",
+            timeout_seconds=3600,
         )
 
         assert status == "failed"
@@ -356,6 +374,7 @@ class TestRunSopsFail:
             commands_b64=_encode_commands(["echo never"]),
             done_endpoint=DONE_ENDPOINT,
             execution_target="lambda",
+            timeout_seconds=3600,
         )
 
         assert status == "failed"
@@ -390,6 +409,7 @@ class TestRunCommandFail:
             commands_b64=_encode_commands(["echo ok", "exit 1", "echo unreachable"]),
             done_endpoint=DONE_ENDPOINT,
             execution_target="codebuild",
+            timeout_seconds=3600,
         )
 
         assert status == "failed"
@@ -421,6 +441,7 @@ class TestRunAlwaysWritesResult:
             commands_b64=_encode_commands(["echo"]),
             done_endpoint=DONE_ENDPOINT,
             execution_target="lambda",
+            timeout_seconds=3600,
         )
 
         mock_write.assert_called_once()
@@ -448,6 +469,7 @@ class TestRunAlwaysWritesResult:
             commands_b64=_encode_commands(["echo"]),
             done_endpoint=DONE_ENDPOINT,
             execution_target="lambda",
+            timeout_seconds=3600,
         )
 
         mock_write.assert_called_once()
@@ -472,6 +494,7 @@ class TestRunAlwaysWritesResult:
             commands_b64=_encode_commands(["echo"]),
             done_endpoint=DONE_ENDPOINT,
             execution_target="lambda",
+            timeout_seconds=3600,
         )
 
         mock_write.assert_called_once()
@@ -496,6 +519,7 @@ class TestRunAlwaysWritesResult:
                 commands_b64=_encode_commands(["echo"]),
                 done_endpoint=DONE_ENDPOINT,
                 execution_target="lambda",
+                timeout_seconds=3600,
             )
 
 
@@ -526,6 +550,7 @@ class TestRunCallback:
             commands_b64=_encode_commands(["echo ok"]),
             done_endpoint=DONE_ENDPOINT,
             execution_target="lambda",
+            timeout_seconds=3600,
         )
 
         mock_post_callback.assert_called_once_with(None, None, mock_write.call_args[0][1])
@@ -557,6 +582,7 @@ class TestRunCallback:
             commands_b64=_encode_commands(["echo ok"]),
             done_endpoint=DONE_ENDPOINT,
             execution_target="lambda",
+            timeout_seconds=3600,
             callback_url="https://caller.example.com/hooks/done",
             callback_token="tok-abc",
         )
@@ -591,6 +617,7 @@ class TestRunCallback:
             commands_b64=_encode_commands(["echo never"]),
             done_endpoint=DONE_ENDPOINT,
             execution_target="lambda",
+            timeout_seconds=3600,
             callback_url="https://caller.example.com/hooks/done",
             callback_token="tok-abc",
         )
@@ -622,11 +649,288 @@ class TestRunCallback:
                 commands_b64=_encode_commands(["echo"]),
                 done_endpoint=DONE_ENDPOINT,
                 execution_target="lambda",
+                timeout_seconds=3600,
                 callback_url="https://caller.example.com/hooks/done",
                 callback_token="tok-abc",
             )
 
         mock_post_callback.assert_not_called()
+
+
+class TestRunDeadline:
+    """timeout_seconds (T) is the deadline for the whole run: the command is
+    killed and the marker is ``failed`` with an error that names T."""
+
+    @patch("aws_exe_sys.worker.run.write_result")
+    @patch("aws_exe_sys.worker.run.fetch_code_s3")
+    def test_command_longer_than_timeout_writes_timed_out_failed_result(
+        self,
+        mock_fetch,
+        mock_write,
+        tmp_path,
+    ):
+        mock_fetch.return_value = str(tmp_path)
+
+        status = run(
+            trigger_id="t-timeout",
+            s3_package_uri="s3://bucket/exec.zip",
+            sops_type=None,
+            sops_path=None,
+            commands_b64=_encode_commands(["echo ok", "sleep 30", "echo never"]),
+            done_endpoint=DONE_ENDPOINT,
+            execution_target="lambda",
+            timeout_seconds=1,
+        )
+
+        assert status == "failed"
+        mock_write.assert_called_once()
+        result_arg = mock_write.call_args[0][1]
+        assert result_arg.status == "failed"
+        assert result_arg.error.startswith("execution timed out at 1 seconds")
+        assert [s.step_name for s in result_arg.steps] == ["step-0", "step-1"]
+        assert result_arg.steps[0].status == "succeeded"
+        assert result_arg.steps[1].status == "failed"
+
+    @patch("aws_exe_sys.worker.run.write_result")
+    @patch("aws_exe_sys.worker.run.run_commands")
+    @patch("aws_exe_sys.worker.run.fetch_code_s3")
+    def test_deadline_counts_from_run_entry(
+        self,
+        mock_fetch,
+        mock_run_cmds,
+        mock_write,
+    ):
+        """The deadline handed to run_commands is entry + T, not a fresh T after fetch/decrypt."""
+        mock_fetch.return_value = "/tmp/work"
+        mock_run_cmds.return_value = [
+            StepResult(step_name="step-0", status="succeeded", exit_code=0, duration_seconds=0.1, output="ok"),
+        ]
+        before = time.monotonic()
+
+        run(
+            trigger_id="t-deadline",
+            s3_package_uri="s3://bucket/exec.zip",
+            sops_type=None,
+            sops_path=None,
+            commands_b64=_encode_commands(["echo ok"]),
+            done_endpoint=DONE_ENDPOINT,
+            execution_target="lambda",
+            timeout_seconds=600,
+        )
+
+        deadline = mock_run_cmds.call_args.kwargs["deadline"]
+        assert before + 600 <= deadline <= time.monotonic() + 600
+
+
+def _package_zip() -> bytes:
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("run.sh", "echo never\n")
+    return archive.getvalue()
+
+
+class _StalledAwsHandler(BaseHTTPRequestHandler):
+    """A stand-in S3 + SSM endpoint that answers headers at once and withholds bodies.
+
+    S3: HEAD returns the package size; GET sends its headers, then holds the
+    zip body for ``STALL_SECONDS``; PUT records the result marker (time, body).
+    SSM: POST (GetParameter) holds its response for ``STALL_SECONDS``.
+    """
+
+    protocol_version = "HTTP/1.1"  # answers the S3 PUT's Expect: 100-continue at once
+    PACKAGE = _package_zip()
+    STALL_SECONDS = 6.0
+    STALL_GET = False
+    STALL_SSM = False
+    markers: list[tuple[float, dict]] = []
+
+    def log_message(self, *_args):  # keep pytest output clean
+        pass
+
+    def _package_headers(self):
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(self.PACKAGE)))
+        self.send_header("Content-Type", "application/zip")
+        self.end_headers()
+
+    def do_HEAD(self):
+        self._package_headers()
+
+    def do_GET(self):
+        self._package_headers()
+        if self.STALL_GET:
+            time.sleep(self.STALL_SECONDS)
+        try:
+            self.wfile.write(self.PACKAGE)
+        except (BrokenPipeError, ConnectionResetError):
+            return
+
+    def do_PUT(self):
+        body = self.rfile.read(int(self.headers["Content-Length"]))
+        self.markers.append((time.monotonic(), json.loads(body)))
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        if self.STALL_SSM:
+            time.sleep(self.STALL_SECONDS)
+        body = b'{"Parameter": {"Value": "AGE-SECRET-KEY-1TEST"}}'
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-amz-json-1.1")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            return
+
+
+@pytest.fixture
+def stalled_aws(monkeypatch):
+    """Point boto3's S3 and SSM clients at the stalling stand-in over real HTTP."""
+    _StalledAwsHandler.markers = []
+    _StalledAwsHandler.STALL_GET = False
+    _StalledAwsHandler.STALL_SSM = False
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _StalledAwsHandler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    endpoint = f"http://127.0.0.1:{server.server_port}"
+    monkeypatch.setenv("AWS_ENDPOINT_URL_S3", endpoint)
+    monkeypatch.setenv("AWS_ENDPOINT_URL_SSM", endpoint)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+    yield _StalledAwsHandler
+    server.shutdown()
+
+
+def _handler_event(**overrides) -> dict:
+    event = {
+        "trigger_id": "t-stalled",
+        "s3_package_uri": "s3://pkg-bucket/exec/stalled.zip",
+        "sops_type": None,
+        "sops_path": None,
+        "commands_b64": _encode_commands(["echo never"]),
+        "done_endpoint": DONE_ENDPOINT,
+        "execution_target": "lambda",
+        "timeout_seconds": 1,
+    }
+    event.update(overrides)
+    return event
+
+
+class TestRunDeadlineCoversPreparation:
+    """T covers every blocking preparation call, not only the commands: a
+    stalled S3 GET (headers sent, body withheld), a stalled SSM GetParameter or
+    a hung ``sops`` yields the timed-out ``failed`` marker at T, with no step
+    run. The two stalled cases go through the real handler and the real
+    ``write_result`` PUT, so the marker's arrival time is what is measured."""
+
+    MARKER_WITHIN_SECONDS = 3  # T=1 plus the reserve for the result write; the body is held for 6
+
+    def test_stalled_package_download_writes_the_marker_at_timeout(self, stalled_aws):
+        stalled_aws.STALL_GET = True
+        started = time.monotonic()
+
+        response = handler(_handler_event())
+
+        assert response == {"status": "failed"}
+        assert len(stalled_aws.markers) == 1
+        written_at, marker = stalled_aws.markers[0]
+        assert written_at - started < self.MARKER_WITHIN_SECONDS, "marker waited for the withheld body"
+        assert marker["status"] == "failed"
+        assert marker["error"].startswith("execution timed out at 1 seconds")
+        assert "fetching the package" in marker["error"]
+        assert marker["steps"] == []
+
+    def test_stalled_ssm_key_fetch_writes_the_marker_at_timeout(self, stalled_aws):
+        stalled_aws.STALL_SSM = True
+        started = time.monotonic()
+
+        response = handler(_handler_event(sops_type="ssm", sops_path="/exe-sys/sops-keys/t-stalled"))
+
+        assert response == {"status": "failed"}
+        assert len(stalled_aws.markers) == 1
+        written_at, marker = stalled_aws.markers[0]
+        assert written_at - started < self.MARKER_WITHIN_SECONDS, "marker waited for the withheld SSM response"
+        assert marker["status"] == "failed"
+        assert marker["error"].startswith("execution timed out at 1 seconds")
+        assert "fetching the SOPS key from SSM" in marker["error"]
+        assert marker["steps"] == []
+
+    def test_codebuild_entry_exits_at_timeout_with_the_download_stalled(self, stalled_aws):
+        """The CodeBuild delivery (``entrypoint.sh`` → ``python3 -m aws_exe_sys.worker.handler``)
+        must EXIT near T, not only write its marker near T: nothing the package
+        fetch started may be joined at interpreter exit while the body is withheld."""
+        stalled_aws.STALL_GET = True
+        env = {
+            **os.environ,
+            "TRIGGER_ID": "t-stalled",
+            "S3_PACKAGE_URI": "s3://pkg-bucket/exec/stalled.zip",
+            "COMMANDS_B64": _encode_commands(["echo never"]),
+            "DONE_ENDPOINT": DONE_ENDPOINT,
+            "EXECUTION_TARGET": "codebuild",
+            "TIMEOUT_SECONDS": "1",
+        }
+        started = time.monotonic()
+
+        proc = subprocess.run(
+            [sys.executable, "-m", "aws_exe_sys.worker.handler"],
+            cwd=Path(__file__).resolve().parents[2],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=stalled_aws.STALL_SECONDS + 10,
+        )
+
+        exited_at = time.monotonic()
+        assert proc.returncode == 1, proc.stderr
+        assert exited_at - started < self.MARKER_WITHIN_SECONDS, f"process waited for the withheld body: {proc.stderr}"
+        assert len(stalled_aws.markers) == 1
+        written_at, marker = stalled_aws.markers[0]
+        assert written_at - started < self.MARKER_WITHIN_SECONDS, "marker waited for the withheld body"
+        assert marker["status"] == "failed"
+        assert marker["error"].startswith("execution timed out at 1 seconds")
+        assert "fetching the package" in marker["error"]
+        assert marker["steps"] == []
+
+    @patch("aws_exe_sys.worker.run.write_result")
+    @patch("aws_exe_sys.worker.run.fetch_code_s3")
+    def test_hung_sops_decrypt_is_killed_at_timeout(self, mock_fetch, mock_write, tmp_path, monkeypatch):
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        (work_dir / "secrets.enc.json").write_text("{}")
+        mock_fetch.return_value = str(work_dir)
+
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        fake_sops = fake_bin / "sops"
+        fake_sops.write_text("#!/bin/sh\nsleep 30\n")
+        fake_sops.chmod(fake_sops.stat().st_mode | stat.S_IXUSR)
+        monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
+        started = time.monotonic()
+
+        status = run(
+            trigger_id="t-hung-sops",
+            s3_package_uri="s3://bucket/exec.zip",
+            sops_type="kms",
+            sops_path=None,
+            commands_b64=_encode_commands(["echo never"]),
+            done_endpoint=DONE_ENDPOINT,
+            execution_target="lambda",
+            timeout_seconds=1,
+        )
+
+        assert time.monotonic() - started < 10, "sops ran past the deadline"
+        assert status == "failed"
+        result_arg = mock_write.call_args[0][1]
+        assert result_arg.status == "failed"
+        assert result_arg.error.startswith("execution timed out at 1 seconds")
+        assert "sops was running; killed" in result_arg.error
+        assert result_arg.steps == []
 
 
 class TestRunNoEnvironMutation:
@@ -658,6 +962,7 @@ class TestRunNoEnvironMutation:
             commands_b64=_encode_commands(["echo"]),
             done_endpoint=DONE_ENDPOINT,
             execution_target="lambda",
+            timeout_seconds=3600,
         )
         env_after = os.environ.copy()
 

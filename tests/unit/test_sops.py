@@ -1,6 +1,7 @@
 """Unit tests for aws_exe_sys/common/sops.py — engine-side SOPS operations."""
 
 import json
+import time
 from unittest.mock import MagicMock, patch
 
 from botocore.exceptions import ClientError
@@ -15,20 +16,33 @@ from aws_exe_sys.common.sops import (
     fetch_sops_key_ssm,
     handle_sops,
 )
+from aws_exe_sys.common.subprocess_runner import ExecutionTimedOut
+
+
+def _far() -> float:
+    """A deadline no test here reaches."""
+    return time.monotonic() + 60
 
 
 class TestRunCmd:
-    @patch("subprocess.run")
-    def test_success(self, mock_subprocess):
-        mock_subprocess.return_value = MagicMock(returncode=0, stdout="output", stderr="")
-        result = sops._run_cmd(["echo", "hello"])
-        assert result == "output"
+    def test_success(self):
+        result = sops._run_cmd(["echo", "hello"], deadline=_far())
+        assert result == "hello\n"
 
-    @patch("subprocess.run")
-    def test_failure_raises(self, mock_subprocess):
-        mock_subprocess.return_value = MagicMock(returncode=1, stdout="", stderr="error message")
+    def test_failure_raises(self):
         with pytest.raises(RuntimeError, match="Command failed"):
-            sops._run_cmd(["bad", "cmd"])
+            sops._run_cmd(["sh", "-c", "echo error message >&2; exit 1"], deadline=_far())
+
+    def test_deadline_kills_the_command(self):
+        """sops --decrypt runs under the whole-execution deadline: killed, not waited for."""
+        started = time.monotonic()
+        with pytest.raises(ExecutionTimedOut, match="killed"):
+            sops._run_cmd(["sh", "-c", "sleep 30"], deadline=time.monotonic() + 0.5)
+        assert time.monotonic() - started < 10
+
+    def test_deadline_already_passed_runs_nothing(self):
+        with pytest.raises(ExecutionTimedOut, match="before sh started"):
+            sops._run_cmd(["sh", "-c", "sleep 30"], deadline=time.monotonic() - 1)
 
 
 class TestFetchSopsKeySsm:
@@ -38,7 +52,7 @@ class TestFetchSopsKeySsm:
         mock_client_factory.return_value = mock_ssm
         mock_ssm.get_parameter.return_value = {"Parameter": {"Value": "AGE-SECRET-KEY-1ABC"}}
 
-        result = fetch_sops_key_ssm("/exe-sys/sops-keys/run-1/000")
+        result = fetch_sops_key_ssm("/exe-sys/sops-keys/run-1/000", deadline=_far())
 
         assert result == "AGE-SECRET-KEY-1ABC"
         mock_ssm.get_parameter.assert_called_once_with(Name="/exe-sys/sops-keys/run-1/000", WithDecryption=True)
@@ -58,7 +72,7 @@ class TestFetchSopsKeySsm:
         )
 
         with pytest.raises(SopsKeyExpired) as exc:
-            fetch_sops_key_ssm("/exe-sys/sops-keys/run-expired/000")
+            fetch_sops_key_ssm("/exe-sys/sops-keys/run-expired/000", deadline=_far())
 
         assert "/exe-sys/sops-keys/run-expired/000" in str(exc.value)
 
@@ -77,7 +91,7 @@ class TestFetchSopsKeySsm:
         )
 
         with pytest.raises(SopsKeyExpired):
-            fetch_sops_key_ssm("/exe-sys/sops-keys/run-1/000")
+            fetch_sops_key_ssm("/exe-sys/sops-keys/run-1/000", deadline=_far())
 
     @patch("aws_exe_sys.common.sops.boto3.client")
     def test_reraises_unexpected_client_error(self, mock_client_factory):
@@ -94,7 +108,7 @@ class TestFetchSopsKeySsm:
         )
 
         with pytest.raises(ClientError, match="InternalError"):
-            fetch_sops_key_ssm("/exe-sys/sops-keys/run-1/000")
+            fetch_sops_key_ssm("/exe-sys/sops-keys/run-1/000", deadline=_far())
 
 
 class TestDeleteSopsKeySsm:
@@ -103,7 +117,7 @@ class TestDeleteSopsKeySsm:
         mock_ssm = MagicMock()
         mock_client_factory.return_value = mock_ssm
 
-        delete_sops_key_ssm("/exe-sys/sops-keys/run-1/000")
+        delete_sops_key_ssm("/exe-sys/sops-keys/run-1/000", deadline=_far())
 
         mock_ssm.delete_parameter.assert_called_once_with(Name="/exe-sys/sops-keys/run-1/000")
 
@@ -122,7 +136,7 @@ class TestDeleteSopsKeySsm:
         )
 
         # Should not raise
-        delete_sops_key_ssm("/exe-sys/sops-keys/run-1/000")
+        delete_sops_key_ssm("/exe-sys/sops-keys/run-1/000", deadline=_far())
 
 
 class TestDecryptEnv:
@@ -130,7 +144,7 @@ class TestDecryptEnv:
     def test_decrypt_with_key_string(self, mock_run_cmd):
         mock_run_cmd.return_value = json.dumps({"KEY1": "val1", "KEY2": "val2"})
 
-        result = decrypt_env("/tmp/encrypted.json", "AGE-SECRET-KEY-1ABC")
+        result = decrypt_env("/tmp/encrypted.json", "AGE-SECRET-KEY-1ABC", deadline=_far())
 
         assert result == {"KEY1": "val1", "KEY2": "val2"}
         call_args = mock_run_cmd.call_args[0][0]
@@ -141,7 +155,7 @@ class TestDecryptEnv:
     def test_decrypt_with_key_file(self, mock_isfile, mock_run_cmd):
         mock_run_cmd.return_value = json.dumps({"KEY": "val"})
 
-        result = decrypt_env("/tmp/encrypted.json", "/tmp/key.file")
+        result = decrypt_env("/tmp/encrypted.json", "/tmp/key.file", deadline=_far())
 
         assert result == {"KEY": "val"}
         env_arg = mock_run_cmd.call_args[1].get("env", {})
@@ -153,7 +167,7 @@ class TestDecryptWithKms:
     def test_decrypt_returns_env_vars(self, mock_run_cmd):
         mock_run_cmd.return_value = json.dumps({"AWS_ACCESS_KEY_ID": "AKIA...", "DB_PASS": "secret"})
 
-        result = decrypt_with_kms("/tmp/secrets.enc.json")
+        result = decrypt_with_kms("/tmp/secrets.enc.json", deadline=_far())
 
         assert result == {"AWS_ACCESS_KEY_ID": "AKIA...", "DB_PASS": "secret"}
         call_args = mock_run_cmd.call_args[0][0]
@@ -177,18 +191,18 @@ class TestDecryptWithKms:
         mock_run_cmd.side_effect = RuntimeError("Command failed: sops --decrypt\nKMS error")
 
         with pytest.raises(RuntimeError, match="KMS error"):
-            decrypt_with_kms("/tmp/secrets.enc.json")
+            decrypt_with_kms("/tmp/secrets.enc.json", deadline=_far())
 
 
 class TestHandleSops:
     """Tests for the top-level handle_sops dispatcher."""
 
     def test_none_sops_type_returns_empty_dict(self):
-        result = handle_sops("/tmp/workdir", sops_type=None)
+        result = handle_sops("/tmp/workdir", sops_type=None, deadline=_far())
         assert result == {}
 
     def test_omitted_sops_type_returns_empty_dict(self):
-        result = handle_sops("/tmp/workdir")
+        result = handle_sops("/tmp/workdir", deadline=_far())
         assert result == {}
 
     @patch("aws_exe_sys.common.sops.delete_sops_key_ssm")
@@ -198,16 +212,18 @@ class TestHandleSops:
         mock_fetch.return_value = "AGE-SECRET-KEY-1ABC"
         mock_decrypt.return_value = {"DB_PASS": "secret", "API_KEY": "abc123"}
 
+        deadline = _far()
         result = handle_sops(
             "/tmp/workdir",
             sops_type="ssm",
             sops_path="/exe-sys/sops-keys/run-1/000",
+            deadline=deadline,
         )
 
         assert result == {"DB_PASS": "secret", "API_KEY": "abc123"}
-        mock_fetch.assert_called_once_with("/exe-sys/sops-keys/run-1/000")
-        mock_decrypt.assert_called_once_with("/tmp/workdir/secrets.enc.json", "AGE-SECRET-KEY-1ABC")
-        mock_delete.assert_called_once_with("/exe-sys/sops-keys/run-1/000")
+        mock_fetch.assert_called_once_with("/exe-sys/sops-keys/run-1/000", deadline=deadline)
+        mock_decrypt.assert_called_once_with("/tmp/workdir/secrets.enc.json", "AGE-SECRET-KEY-1ABC", deadline=deadline)
+        mock_delete.assert_called_once_with("/exe-sys/sops-keys/run-1/000", deadline=deadline)
 
     @patch("aws_exe_sys.common.sops.fetch_sops_key_ssm")
     def test_ssm_path_raises_sops_key_expired(self, mock_fetch):
@@ -218,6 +234,7 @@ class TestHandleSops:
                 "/tmp/workdir",
                 sops_type="ssm",
                 sops_path="/exe-sys/sops-keys/run-expired/000",
+                deadline=_far(),
             )
 
     @patch("aws_exe_sys.common.sops.delete_sops_key_ssm")
@@ -236,6 +253,7 @@ class TestHandleSops:
                 "/tmp/workdir",
                 sops_type="ssm",
                 sops_path="/exe-sys/sops-keys/run-1/000",
+                deadline=_far(),
             )
 
         mock_delete.assert_called_once()
@@ -244,11 +262,12 @@ class TestHandleSops:
     def test_kms_path(self, mock_decrypt_kms):
         mock_decrypt_kms.return_value = {"AWS_ACCESS_KEY_ID": "AKIA...", "SECRET": "xyz"}
 
-        result = handle_sops("/tmp/workdir", sops_type="kms")
+        deadline = _far()
+        result = handle_sops("/tmp/workdir", sops_type="kms", deadline=deadline)
 
         assert result == {"AWS_ACCESS_KEY_ID": "AKIA...", "SECRET": "xyz"}
-        mock_decrypt_kms.assert_called_once_with("/tmp/workdir/secrets.enc.json")
+        mock_decrypt_kms.assert_called_once_with("/tmp/workdir/secrets.enc.json", deadline=deadline)
 
     def test_unknown_sops_type_raises(self):
         with pytest.raises(ValueError, match="Unknown sops_type"):
-            handle_sops("/tmp/workdir", sops_type="pgp")
+            handle_sops("/tmp/workdir", sops_type="pgp", deadline=_far())
