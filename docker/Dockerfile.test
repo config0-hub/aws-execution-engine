@@ -19,6 +19,7 @@ COPY tests/ ${LAMBDA_TASK_ROOT}/tests/
 COPY infra/02-deploy/step_functions.tf ${LAMBDA_TASK_ROOT}/infra/02-deploy/step_functions.tf
 COPY infra/02-deploy/codebuild.tf ${LAMBDA_TASK_ROOT}/infra/02-deploy/codebuild.tf
 COPY infra/02-deploy/iam.tf ${LAMBDA_TASK_ROOT}/infra/02-deploy/iam.tf
+COPY infra/02-deploy/lambdas.tf ${LAMBDA_TASK_ROOT}/infra/02-deploy/lambdas.tf
 
 # Copy CONTRACT.md, CLAUDE.md, and docs/ so contract-drift guards can compare docs to code
 COPY CONTRACT.md ${LAMBDA_TASK_ROOT}/CONTRACT.md
