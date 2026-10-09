@@ -1,10 +1,14 @@
 """Unit tests for aws_exe_sys/worker/run.py — simplified single-entrypoint worker."""
 
 import base64
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
-from unittest.mock import patch
+import stat
+import threading
+import time
+from unittest.mock import ANY, patch
 import zipfile
 
 import pytest
@@ -89,7 +93,7 @@ class TestScratchCleanup:
         foreign_file.write_text("keep")
         workdirs: list[Path] = []
 
-        def download_zip(bucket: str, key: str, destination: str) -> None:
+        def download_zip(bucket: str, key: str, destination: str, **_transfer_kwargs) -> None:
             assert bucket == "bucket"
             assert key == "exec.zip"
             with zipfile.ZipFile(destination, "w") as archive:
@@ -204,8 +208,8 @@ class TestRunHappyPath:
         )
 
         assert status == "succeeded"
-        mock_fetch.assert_called_once_with("s3://bucket/exec.zip")
-        mock_sops.assert_called_once_with("/tmp/work", sops_type="ssm", sops_path="/sops/key/path")
+        mock_fetch.assert_called_once_with("s3://bucket/exec.zip", deadline=ANY)
+        mock_sops.assert_called_once_with("/tmp/work", sops_type="ssm", sops_path="/sops/key/path", deadline=ANY)
         mock_run_cmds.assert_called_once()
         mock_write.assert_called_once()
         result_arg = mock_write.call_args[0][1]
@@ -691,8 +695,6 @@ class TestRunDeadline:
         mock_write,
     ):
         """The deadline handed to run_commands is entry + T, not a fresh T after fetch/decrypt."""
-        import time
-
         mock_fetch.return_value = "/tmp/work"
         mock_run_cmds.return_value = [
             StepResult(step_name="step-0", status="succeeded", exit_code=0, duration_seconds=0.1, output="ok"),
@@ -712,6 +714,115 @@ class TestRunDeadline:
 
         deadline = mock_run_cmds.call_args.kwargs["deadline"]
         assert before + 600 <= deadline <= time.monotonic() + 600
+
+
+class _SlowS3Handler(BaseHTTPRequestHandler):
+    """A stand-in S3 endpoint that streams a 2 MiB object slowly (~300 KiB/s)."""
+
+    SIZE = 2 * 1024 * 1024
+    CHUNK = 16 * 1024
+
+    def log_message(self, *_args):  # keep pytest output clean
+        pass
+
+    def _headers(self):
+        self.send_response(200)
+        self.send_header("Content-Length", str(self.SIZE))
+        self.send_header("Content-Type", "application/zip")
+        self.end_headers()
+
+    def do_HEAD(self):
+        self._headers()
+
+    def do_GET(self):
+        self._headers()
+        sent = 0
+        while sent < self.SIZE:
+            try:
+                self.wfile.write(b"\0" * self.CHUNK)
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                return
+            sent += self.CHUNK
+            time.sleep(0.05)
+
+
+@pytest.fixture
+def slow_s3(monkeypatch):
+    """Point boto3's S3 client at the slow stand-in over real HTTP."""
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _SlowS3Handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setenv("AWS_ENDPOINT_URL_S3", f"http://127.0.0.1:{server.server_port}")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    yield server
+    server.shutdown()
+
+
+class TestRunDeadlineCoversPreparation:
+    """T covers package fetch and SOPS decrypt, not only the commands: a real
+    slow download or a real hung ``sops`` yields the timed-out ``failed``
+    marker at T, with no step run."""
+
+    @patch("aws_exe_sys.worker.run.write_result")
+    def test_slow_package_download_is_aborted_at_timeout(self, mock_write, slow_s3):
+        started = time.monotonic()
+
+        status = run(
+            trigger_id="t-slow-fetch",
+            s3_package_uri="s3://pkg-bucket/exec/slow.zip",
+            sops_type=None,
+            sops_path=None,
+            commands_b64=_encode_commands(["echo never"]),
+            done_endpoint=DONE_ENDPOINT,
+            execution_target="lambda",
+            timeout_seconds=1,
+        )
+
+        assert time.monotonic() - started < 6, "download ran past the deadline"
+        assert status == "failed"
+        result_arg = mock_write.call_args[0][1]
+        assert result_arg.status == "failed"
+        assert result_arg.error.startswith("execution timed out at 1 seconds")
+        assert "fetching the package" in result_arg.error
+        assert result_arg.steps == []
+
+    @patch("aws_exe_sys.worker.run.write_result")
+    @patch("aws_exe_sys.worker.run.fetch_code_s3")
+    def test_hung_sops_decrypt_is_killed_at_timeout(self, mock_fetch, mock_write, tmp_path, monkeypatch):
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        (work_dir / "secrets.enc.json").write_text("{}")
+        mock_fetch.return_value = str(work_dir)
+
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        fake_sops = fake_bin / "sops"
+        fake_sops.write_text("#!/bin/sh\nsleep 30\n")
+        fake_sops.chmod(fake_sops.stat().st_mode | stat.S_IXUSR)
+        monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
+        started = time.monotonic()
+
+        status = run(
+            trigger_id="t-hung-sops",
+            s3_package_uri="s3://bucket/exec.zip",
+            sops_type="kms",
+            sops_path=None,
+            commands_b64=_encode_commands(["echo never"]),
+            done_endpoint=DONE_ENDPOINT,
+            execution_target="lambda",
+            timeout_seconds=1,
+        )
+
+        assert time.monotonic() - started < 10, "sops ran past the deadline"
+        assert status == "failed"
+        result_arg = mock_write.call_args[0][1]
+        assert result_arg.status == "failed"
+        assert result_arg.error.startswith("execution timed out at 1 seconds")
+        assert "sops was running; killed" in result_arg.error
+        assert result_arg.steps == []
 
 
 class TestRunNoEnvironMutation:

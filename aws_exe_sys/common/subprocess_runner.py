@@ -22,6 +22,32 @@ class ExecutionTimedOut(Exception):
         self.steps = steps
 
 
+def run_until_deadline(
+    args,
+    *,
+    deadline: float,
+    **popen_kwargs,
+) -> tuple[int, bytes | str, bytes | str | None, bool]:
+    """Start ``args`` in its own session and wait for it, no later than ``deadline``.
+
+    Every subprocess the engine runs under the execution deadline goes through
+    here: the shell commands in :func:`run_commands` and ``sops --decrypt``.
+    ``start_new_session=True`` puts the process in its own process group so the
+    deadline kill (SIGKILL on the group) reaches the process AND its children.
+
+    Returns ``(returncode, stdout, stderr, timed_out)``. ``stdout``/``stderr``
+    are whatever ``popen_kwargs`` asked ``Popen`` to capture.
+    """
+    proc = subprocess.Popen(args, start_new_session=True, **popen_kwargs)
+    try:
+        stdout, stderr = proc.communicate(timeout=max(deadline - time.monotonic(), 0))
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        stdout, stderr = proc.communicate()
+        return proc.returncode, stdout, stderr, True
+    return proc.returncode, stdout, stderr, False
+
+
 def run_commands(
     commands: list[str],
     env: dict[str, str] | None = None,
@@ -61,32 +87,22 @@ def run_commands(
 
     for idx, cmd in enumerate(commands):
         step_name = f"step-{idx}"
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        if time.monotonic() >= deadline:
             raise ExecutionTimedOut(f"deadline passed before {step_name} started", results)
 
         start = time.monotonic()
-        proc = subprocess.Popen(
+        exit_code, stdout_bytes, _, timed_out = run_until_deadline(
             cmd,
+            deadline=deadline,
             shell=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             cwd=work_dir,
             env=env,
-            start_new_session=True,
         )
-        timed_out = False
-        try:
-            stdout_bytes, _ = proc.communicate(timeout=remaining)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            # SIGKILL the whole process group: the shell AND its children.
-            os.killpg(proc.pid, signal.SIGKILL)
-            stdout_bytes, _ = proc.communicate()
         elapsed = time.monotonic() - start
 
         output = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
-        exit_code = proc.returncode
         status = "succeeded" if exit_code == 0 and not timed_out else "failed"
 
         results.append(

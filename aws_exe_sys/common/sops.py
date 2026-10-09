@@ -8,9 +8,12 @@ import contextlib
 import json
 import os
 import subprocess
+import time
 
 import boto3
 from botocore.exceptions import ClientError
+
+from aws_exe_sys.common.subprocess_runner import ExecutionTimedOut, run_until_deadline
 
 
 class SopsKeyExpired(Exception):
@@ -24,17 +27,28 @@ class SopsKeyExpired(Exception):
     """
 
 
-def _run_cmd(cmd: list, env: dict | None = None) -> str:
-    """Run a subprocess command and return stdout."""
-    result = subprocess.run(
+def _run_cmd(cmd: list, env: dict | None = None, *, deadline: float) -> str:
+    """Run a subprocess command under the execution deadline and return stdout.
+
+    The command shares the worker's one whole-execution deadline: it is not
+    started once the deadline has passed, and it is killed (with its process
+    group) when the deadline passes while it runs.
+    """
+    if time.monotonic() >= deadline:
+        raise ExecutionTimedOut(f"deadline passed before {cmd[0]} started", [])
+    returncode, stdout, stderr, timed_out = run_until_deadline(
         cmd,
-        capture_output=True,
+        deadline=deadline,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         env={**os.environ, **(env or {})},
     )
-    if result.returncode != 0:
-        raise RuntimeError(f"Command failed: {' '.join(cmd)}\n{result.stderr}")
-    return result.stdout
+    if timed_out:
+        raise ExecutionTimedOut(f"deadline passed while {cmd[0]} was running; killed", [])
+    if returncode != 0:
+        raise RuntimeError(f"Command failed: {' '.join(cmd)}\n{stderr}")
+    return stdout
 
 
 def fetch_sops_key_ssm(ssm_path: str) -> str:
@@ -71,6 +85,8 @@ def delete_sops_key_ssm(ssm_path: str) -> None:
 def decrypt_env(
     encrypted_path: str,
     sops_key: str,
+    *,
+    deadline: float,
 ) -> dict[str, str]:
     """Decrypt a SOPS file using an age key and return dict of env vars."""
     env_extra = {}
@@ -90,11 +106,12 @@ def decrypt_env(
             encrypted_path,
         ],
         env=env_extra,
+        deadline=deadline,
     )
     return json.loads(output)
 
 
-def decrypt_with_kms(encrypted_path: str) -> dict[str, str]:
+def decrypt_with_kms(encrypted_path: str, *, deadline: float) -> dict[str, str]:
     """Decrypt a SOPS file using KMS (ARN embedded in the SOPS file metadata).
 
     Calls ``sops --decrypt`` directly — no key parameter needed because the
@@ -112,6 +129,7 @@ def decrypt_with_kms(encrypted_path: str) -> dict[str, str]:
             "json",
             encrypted_path,
         ],
+        deadline=deadline,
     )
     return json.loads(output)
 
@@ -120,6 +138,8 @@ def handle_sops(
     work_dir: str,
     sops_type: str | None = None,
     sops_path: str | None = None,
+    *,
+    deadline: float,
 ) -> dict[str, str]:
     """Top-level SOPS dispatcher.
 
@@ -129,6 +149,8 @@ def handle_sops(
             or None (skip decryption).
         sops_path: SSM parameter path for the age key (required when
             sops_type="ssm").
+        deadline: ``time.monotonic()`` value of the worker's whole-execution
+            deadline; ``sops --decrypt`` is killed when it passes.
 
     Returns:
         Dict of decrypted env vars, or empty dict if sops_type is None.
@@ -142,11 +164,11 @@ def handle_sops(
         if not sops_path:
             raise ValueError("sops_path is required when sops_type is 'ssm'")
         age_key = fetch_sops_key_ssm(sops_path)
-        decrypted = decrypt_env(encrypted_path, age_key)
+        decrypted = decrypt_env(encrypted_path, age_key, deadline=deadline)
         delete_sops_key_ssm(sops_path)
         return decrypted
 
     if sops_type == "kms":
-        return decrypt_with_kms(encrypted_path)
+        return decrypt_with_kms(encrypted_path, deadline=deadline)
 
     raise ValueError(f"Unknown sops_type: {sops_type!r}")

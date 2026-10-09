@@ -40,8 +40,15 @@ def cleanup_stale_workdirs() -> None:
             shutil.rmtree(path)
 
 
-def fetch_code_s3(s3_location: str) -> str:
-    """Download and extract a zip from S3. Returns path to extracted directory."""
+def fetch_code_s3(s3_location: str, *, deadline: float) -> str:
+    """Download and extract a zip from S3 under the execution deadline.
+
+    Returns the path to the extracted directory. The download is aborted and
+    :class:`ExecutionTimedOut` raised as soon as a transferred chunk lands
+    past ``deadline`` (boto3's transfer ``Callback``); extraction checks the
+    deadline per archive member. A transfer that delivers no bytes at all is
+    bounded by botocore's own read timeout and retries instead.
+    """
     import boto3
 
     scratch_root = _scratch_root()
@@ -51,12 +58,19 @@ def fetch_code_s3(s3_location: str) -> str:
     bucket = parts[0]
     key = parts[1] if len(parts) > 1 else ""
 
+    def _abort_past_deadline(_bytes_transferred: int) -> None:
+        if time.monotonic() >= deadline:
+            raise ExecutionTimedOut("deadline passed while fetching the package; download aborted", [])
+
     local_zip = os.path.join(work_dir, "code.zip")
     s3_client = boto3.client("s3")
-    s3_client.download_file(bucket, key, local_zip)
+    s3_client.download_file(bucket, key, local_zip, Callback=_abort_past_deadline)
 
     with zipfile.ZipFile(local_zip, "r") as zf:
-        zf.extractall(work_dir)
+        for member in zf.infolist():
+            if time.monotonic() >= deadline:
+                raise ExecutionTimedOut("deadline passed while extracting the package", [])
+            zf.extract(member, work_dir)
     os.unlink(local_zip)
     return work_dir
 
@@ -86,9 +100,9 @@ def run(
         8. If callback_url is set, best-effort POST the result (log-only on failure)
 
     ``timeout_seconds`` is the payload's T: one deadline for the whole run,
-    counted from entry (package fetch, decrypt and every command share it).
-    When it passes, the running command's process group is killed and the
-    result is ``failed`` with an error that names T.
+    counted from entry and enforced at every stage: the package download is
+    aborted, ``sops --decrypt`` and the running command are killed with their
+    process groups. The result is then ``failed`` with an error that names T.
 
     Returns the final status string ("succeeded" or "failed").
     """
@@ -101,12 +115,12 @@ def run(
         cleanup_stale_workdirs()
 
         # 2. Download and extract code package
-        work_dir = fetch_code_s3(s3_package_uri)
+        work_dir = fetch_code_s3(s3_package_uri, deadline=deadline)
 
         # 3. Decrypt SOPS secrets if configured
         env_vars: dict[str, str] = {}
         if sops_type is not None:
-            env_vars = handle_sops(work_dir, sops_type=sops_type, sops_path=sops_path)
+            env_vars = handle_sops(work_dir, sops_type=sops_type, sops_path=sops_path, deadline=deadline)
 
         # 4. Decode commands
         commands: list[str] = json.loads(base64.b64decode(commands_b64))
