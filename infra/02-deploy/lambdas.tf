@@ -91,12 +91,18 @@ resource "aws_lambda_function" "worker" {
 # init_job invokes the worker with InvocationType=Event; the Lambda service
 # would retry a failed async invoke twice by default, re-running work the
 # order already fired. The run-cycle contract's timeout rule sets retries to
-# 0 for both engine Lambdas. A Lambda that dies anyway (crash, out of memory,
+# 0 for every engine Lambda. A Lambda that dies anyway (crash, out of memory,
 # function timeout) is reported to the failures queue so people can see the
 # death; the order itself is failed by its caller when no result marker
 # arrives. Nothing consumes the queue on the order's behalf. An async invoke
 # the Lambda service cannot start within 60 seconds is reported there too,
 # not started later against an order its caller has already failed.
+#
+# The finalizer carries the same config. Today its only invoker is the
+# CodeBuild state machine's FinalizeResult task (step_functions.tf,
+# states:::lambda:invoke, a RequestResponse call that Step Functions itself
+# retries), so the Lambda service's async retry never applies to it; the
+# config closes the door should anything ever invoke it with Event.
 
 resource "aws_sqs_queue" "lambda_failures" {
   name = "${local.prefix}-lambda-failures"
@@ -116,6 +122,18 @@ resource "aws_lambda_function_event_invoke_config" "init_job" {
 
 resource "aws_lambda_function_event_invoke_config" "worker" {
   function_name                = aws_lambda_function.worker.function_name
+  maximum_event_age_in_seconds = 60
+  maximum_retry_attempts       = 0
+
+  destination_config {
+    on_failure {
+      destination = aws_sqs_queue.lambda_failures.arn
+    }
+  }
+}
+
+resource "aws_lambda_function_event_invoke_config" "finalizer" {
+  function_name                = aws_lambda_function.finalizer.function_name
   maximum_event_age_in_seconds = 60
   maximum_retry_attempts       = 0
 
