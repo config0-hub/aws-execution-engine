@@ -23,7 +23,7 @@ data "aws_iam_policy_document" "lambda_logs" {
   }
 }
 
-# --- On-failure destination (attached to init_job and worker roles) ---
+# --- On-failure destination (attached to every Lambda role) ---
 # The Lambda service delivers a dead async invoke to the failures queue
 # (lambdas.tf aws_lambda_function_event_invoke_config) under the function's
 # own execution role, so each role needs sqs:SendMessage on that queue.
@@ -185,6 +185,12 @@ resource "aws_iam_role_policy" "finalizer_logs" {
   name   = "logs"
   role   = aws_iam_role.finalizer.id
   policy = data.aws_iam_policy_document.lambda_logs.json
+}
+
+resource "aws_iam_role_policy" "finalizer_failure_destination" {
+  name   = "failure-destination"
+  role   = aws_iam_role.finalizer.id
+  policy = data.aws_iam_policy_document.lambda_failure_destination.json
 }
 
 # ============================================================
