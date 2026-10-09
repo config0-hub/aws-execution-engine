@@ -22,7 +22,7 @@ The run has four distinct roles:
 
 `config0_publisher` and `run_publisher` are different things. The Python
 `config0_publisher` library invokes the engine. The Go `run_publisher` role watches the
-engine's S3 result marker and requeues the order.
+engine's S3 result marker and requeues or fails the order.
 
 The engine has three handlers: `config0-xe-init-job` is the dispatcher, `config0-xe-worker`
 is the Lambda runner, and `aws_exe_sys.finalizer.handler` is the CodeBuild-path finalizer
@@ -38,8 +38,8 @@ sync or async field in `SimplePayload`.
 | Path | Behavior |
 | --- | --- |
 | Inline | This is the default for almost every order. The publisher does the work inside the consumer's CLI subprocess and returns in the same pass. There is no engine payload, result marker, or exit-135 park. |
-| Engine-delegated, asynchronous | This is the default for delegated heavy or long-running work. The publisher invokes the engine and returns. The CLI exits `135`, the consumer parks the order, the Go `run_publisher` role watches the S3 result marker, and a second consumer pass finalizes the order. |
-| Engine-delegated, synchronous | An author can set `sync=True` for delegated work with a bounded duration. The publisher invokes the engine and polls the result marker until the result arrives. The order returns in the same pass, without exit `135` or a `run_publisher` watch. Unbounded mutations do not use this path because the consumer can run out of time before the engine finishes. |
+| Engine-delegated, asynchronous | This is the default for delegated heavy or long-running work. The publisher invokes the engine and returns. The CLI exits `135`, the consumer parks the order, and the Go `run_publisher` role watches the S3 result marker. A `succeeded` marker brings a second consumer pass that finalizes the order; a `failed` marker fails it (see "Asynchronous delegated lifecycle"). |
+| Engine-delegated, synchronous | An author can set `sync=True` for delegated work with a bounded duration. On the `lambda` target the publisher invokes the engine and polls the result marker until the result arrives, and the order returns in the same pass, without exit `135` or a `run_publisher` watch. The `codebuild` target always fires asynchronously, `sync` or not (`config0_publisher` `resource/tf_exec_shell_helper_main.py`); with `sync` set the CLI skips the `135` park, records the resource and returns while the CodeBuild build still runs (`config0_cli` `handlers/__init__.py`). No stack under `src/authoring` sets `sync` today. Unbounded mutations do not use this path because the consumer can run out of time before the engine finishes. |
 
 ## Engine wire boundary
 
@@ -97,8 +97,22 @@ from an execution target.
 
 The engine decodes `commands_b64` into an ordered list of shell commands. It runs the
 commands in order and stops at the first failure. Each step records combined standard
-output and standard error. The engine always writes one `ExecutionResult` to the
-payload's `done_endpoint`, including when execution fails.
+output and standard error. Once `config0-xe-init-job` has dispatched, the engine always
+writes one `ExecutionResult` to the payload's `done_endpoint`, including when execution
+fails. Before dispatch there is no marker: `config0-xe-init-job` validates the payload,
+checks that the S3 package and, for `sops_type="ssm"`, the SSM key exist
+(`aws_exe_sys/init_job/validate.py`), and on a failed check, a validation error or a
+dispatch exception returns `{"status": "error", ...}` and writes nothing. The `sync=True`
+lambda fire reads that answer and fails the order (`config0_publisher`
+`cloud/aws/lambdabuild.py`). The asynchronous fire is a Lambda `Event` invoke, so nobody
+reads the answer: the order waits out its done-marker watch on each attempt, is fired
+again within its `retries`, and ends `timed_out`. One `try` wraps normalization, payload
+validation, the resource checks and dispatch (`aws_exe_sys/init_job/handler.py`); its
+`except Exception` logs any unexpected exception from any of them in the
+`config0-xe-init-job` CloudWatch logs. That includes a dispatch exception and a
+resource-check exception other than `ClientError`, which `validate.py` does not catch.
+Returned `resource_errors` and a caught `PayloadValidationError` are returned and
+discarded, and are not logged.
 
 The worker is the only writer of the real result. The finalizer Lambda
 (`aws_exe_sys.finalizer.handler`), which the CodeBuild workflow invokes after the build
@@ -129,9 +143,20 @@ A delegated cross-account run uses separate credential sessions:
   credentials; it does not acquire them.
 - `assume_engine` is the narrower hub-account control-plane session (the architecture
   contract, Stage 5b, lists its grants). The Go `run_publisher` role reads the S3 result
-  marker with it, and the consumer's CLI subprocess holds it as its ambient `AWS_*`
-  while it fires. It cannot run the target-account operation.
+  marker with it, and for every engine-delegating role the consumer's CLI subprocess
+  holds it as its ambient `AWS_*` while it fires, so package staging, the SOPS age-key
+  put and the `config0-xe-init-job` invoke run under it. It never reaches target-account
+  infrastructure.
 - The Go worker uses separate run-scoped credentials for its order-queue work.
+
+For every engine-delegating role (`stack/*`, `resource/cli*`, `resource/remove*`) the
+consumer mints both sessions and sets them in one shape: `assume_target` under
+`CONFIG0_TARGET_AWS_*` and `assume_engine` as the bare `AWS_*` (`config0-worker`
+`internal/consumer/executor.go` `injectOrderCreds`). When hub equals target both
+sessions are the same role. The publisher seals only the `CONFIG0_TARGET_` names into
+the package (`config0_publisher` `cloud/aws/xe_engine.py` `target_creds_for_sops`, which
+raises when the default target key id or secret is missing), so the hub session never
+rides into the engine.
 
 QHost requests `assume_target` and `assume_engine` through `/api/v1/creds`; config0-hub
 performs the AWS Security Token Service role assumption. If required cross-account
@@ -140,7 +165,8 @@ credentials are missing or failed, the order fails before the engine is invoked.
 ## Host-order credentials
 
 `group/orders/host/add` invokes the SSM EC2 executor directly, not the xe
-engine. Both the aggregate and child carry the hub `assume_engine` session as
+engine. It carries the same two-session shape as an engine-delegating role.
+Both the aggregate and child carry the hub `assume_engine` session as
 ambient `AWS_*` and the target `assume_target` session as `CONFIG0_TARGET_AWS_*`.
 This replaces the host-order target-only rule, including when hub equals target.
 
@@ -183,7 +209,8 @@ Do NOT invent a different plumbing mechanism for a use case. Concretely:
 
 ## Asynchronous delegated lifecycle
 
-The asynchronous path has two consumer passes separated by an S3 watch:
+The asynchronous path is a consumer pass, an S3 watch, and, for a `succeeded` result, a
+second consumer pass:
 
 1. **Fire and park.** The consumer claims the order and starts the Python CLI
    subprocess. The stack drives the publisher, which builds the commands, stages the
@@ -195,10 +222,27 @@ The asynchronous path has two consumer passes separated by an S3 watch:
    order remains parked. If the marker is still absent at the order's `expire_at`
    deadline, the order is requeued from phase 1 and the engine is fired again, bounded
    by the order's `retries`. Exhausting the retry budget is a hard failure.
-3. **Finalize.** When the result marker exists, `run_publisher` requeues the order for
-   a second consumer pass. The Python publisher reads the `ExecutionResult`. A
-   successful result is recorded through the Python resource path, and the order is
-   completed or failed according to the result.
+3. **Finalize.** When the result marker says `succeeded`, `run_publisher` requeues the
+   order for a second consumer pass (`requeueForPhase2` stamps `engine_phase=finalize`).
+   The Python publisher reads the `ExecutionResult`, the result is recorded through the
+   Python resource path, and the order completes. A `failed` marker on an
+   engine-delegated order goes terminal in `run_publisher` itself
+   (`RecordEngineDoneFailure`, status `failed`, the engine's error as the reason): there
+   is no second pass, and the Python publisher never reads that result. A host order
+   (`group/orders/host*`) is the exception: any result requeues it for the second pass,
+   so its cleanup runs before it goes terminal (`config0-worker`
+   `internal/publisher/publisher.go` `pollEngineJobs`).
+
+Exit `135` parks the order at `phase2complete`. What the consumer stores, and what
+`run_publisher` does with it, depends on the line the CLI printed with that exit
+(`config0-worker` `internal/consumer/executor.go` `parkMetadata`,
+`internal/consumer/consumer.go` `recordPhase2Transition`):
+
+| The CLI printed | The consumer parks | `run_publisher` |
+| --- | --- | --- |
+| `CONFIG0_ENGINE_DONE_ENDPOINT=<uri>` | `engine_done_endpoint` plus `expire_at`, the done-marker watch deadline. | Reads the S3 result marker: steps 2 and 3 above. |
+| `CONFIG0_APPROVAL_WATCH=<watch>` (only a `gitops/tenant/execute` order; `config0_cli` `handlers/gitops.py`) | The approval watch, with no `engine_done_endpoint` and `expire_at` set to `0`, which means no deadline. No engine execution is involved. | Asks QHost for the decision on the run's `pipeline_run` record. A delivered decision, or a head change recorded for the watched checkpoint, requeues the order for the second pass. An absent decision leaves it parked. |
+| Neither line | No watch, and no deadline. | Skips the order on every poll. Only a shellout script or a `sh -c` role command that itself exits `135` reaches this row; a `gitops/tenant/execute` order that does fails instead, with exit code `1`. |
 
 ## The timeout rule: one number, T
 
