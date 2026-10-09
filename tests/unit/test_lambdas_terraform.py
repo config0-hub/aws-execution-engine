@@ -50,3 +50,12 @@ class TestAsyncRetriesAreOff:
             block = _resource_block(source, "aws_iam_role_policy", f"{name}_failure_destination")
             assert f"role   = aws_iam_role.{name}.id" in block
             assert "policy = data.aws_iam_policy_document.lambda_failure_destination.json" in block
+
+
+class TestWorkerFunctionTimeoutIsTheAwsUpperBound:
+    def test_worker_defaults_to_900_and_init_job_is_not_raised(self):
+        source = LAMBDAS_TERRAFORM.read_text()
+        worker = _resource_block(source, "aws_lambda_function", "worker")
+        assert "timeout     = local.default_lambda_timeout > 0 ? local.default_lambda_timeout : 900" in worker
+        init_job = _resource_block(source, "aws_lambda_function", "init_job")
+        assert "timeout     = local.default_lambda_timeout > 0 ? local.default_lambda_timeout : 300" in init_job

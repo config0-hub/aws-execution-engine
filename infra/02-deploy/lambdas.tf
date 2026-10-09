@@ -70,7 +70,10 @@ resource "aws_lambda_function" "worker" {
     command     = ["aws_exe_sys.worker.handler.handler"]
   }
 
-  timeout     = local.default_lambda_timeout > 0 ? local.default_lambda_timeout : 600
+  # 900 is the AWS upper bound: the last layer, never reached. The payload's
+  # timeout_seconds (T, at most 800 for the lambda target) is the clock that
+  # ends the work; the worker kills the run and writes the result at T.
+  timeout     = local.default_lambda_timeout > 0 ? local.default_lambda_timeout : 900
   memory_size = local.default_lambda_memory > 0 ? local.default_lambda_memory : 2048
 
   # Commands may unpack large caller-provided packages and their dependencies.
