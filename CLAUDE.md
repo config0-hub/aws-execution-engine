@@ -66,10 +66,11 @@ engine's own CONTRACT.md v5.1 for the full field table and the SFN `Choice`-bran
 mechanics; this contract does not restate them. The dispatcher validates the payload
 and selects the execution target:
 
-- `lambda` invokes `config0-xe-worker` and is the default for work that fits within
-  Lambda's 15-minute limit.
-- `codebuild` runs the commands in CodeBuild for work that takes longer than 15
-  minutes. The dispatcher does not call CodeBuild directly: it starts the Standard Step
+- `lambda` invokes `config0-xe-worker`. The publisher routes an order whose timeout
+  `T` is 800 seconds or less here (see "The timeout rule" below).
+- `codebuild` runs the commands in CodeBuild. The publisher routes an order whose
+  timeout `T` is over 800 seconds here. The dispatcher does not call CodeBuild
+  directly: it starts the Standard Step
   Functions state machine named by `AWS_EXE_SYS_CODEBUILD_STATE_MACHINE_ARN` on
   `init_job`, and that workflow runs the managed CodeBuild project with
   `codebuild:startBuild.sync`, passing all eleven payload fields as plain-string
@@ -115,8 +116,9 @@ The wire contract supports three secrets paths:
 - `sops_type=null`: the package has no encrypted secrets, so decryption is skipped.
 - `sops_type="ssm"`: the caller encrypts the secrets with a fresh age key, stores the
   private key in AWS Systems Manager Parameter Store, and passes its location as
-  `sops_path`. The engine fetches the key, decrypts the secrets, and deletes the
-  parameter after decryption.
+  `sops_path`. The parameter carries an SSM `Expiration` policy of `T + 300` (see "The
+  timeout rule" below) so a key is never found expired during its own call. The engine
+  fetches the key, decrypts the secrets, and deletes the parameter after decryption.
 - `sops_type="kms"`: the caller encrypts the secrets with AWS Key Management Service.
   The key ARN is in the encrypted file metadata, so `sops_path` is not required.
 
@@ -125,8 +127,10 @@ A delegated cross-account run uses separate credential sessions:
 - `assume_target` provides the target-account permissions needed by the commands. The
   publisher places these credentials in the encrypted package. The engine unwraps the
   credentials; it does not acquire them.
-- `assume_engine` is a narrower session used by the Go `run_publisher` role to read the
-  S3 result marker. It cannot run the target-account operation.
+- `assume_engine` is the narrower hub-account control-plane session (the architecture
+  contract, Stage 5b, lists its grants). The Go `run_publisher` role reads the S3 result
+  marker with it, and the consumer's CLI subprocess holds it as its ambient `AWS_*`
+  while it fires. It cannot run the target-account operation.
 - The Go worker uses separate run-scoped credentials for its order-queue work.
 
 QHost requests `assume_target` and `assume_engine` through `/api/v1/creds`; config0-hub
@@ -196,27 +200,29 @@ The asynchronous path has two consumer passes separated by an S3 watch:
    successful result is recorded through the Python resource path, and the order is
    completed or failed according to the result.
 
-The watch deadline is deadline-driven (`config0-worker
-internal/consumer/consumer.go`, `engineWatchTimeout`): it is the order's own
-execution timeout - the larger of `o.TimeoutSeconds` and the order's `timeout`
-param, the same engine TIMEOUT `manage_init` reads - plus a 120-second cushion
-for the gap between FIRE (when the watch starts) and the delegated runtime's
-own clock (which starts only once the work has been queued and provisioned).
-Only an order that carries no timeout at all falls back to the 900-second
-default (`defaultEngineWatchTimeout`). The delegated deadline is carried
-through the whole chain: the publisher sends it as the payload's
-`timeout_seconds` (8th `SimplePayload` field), the engine derives the per-build
-CodeBuild timeout override and the Step Functions state timeout from it, and
-the worker's target-creds session follows the same deadline plus margin,
-bounded by the 3600-second AWS role-chaining cap: the hub mints the creds by
-assuming config0-executor-remote from its own execution role, and STS rejects
-chained sessions longer than 3600s regardless of the role's
-max_session_duration. Delegated work whose order timeout plus the 300s margin
-exceeds 3600s (order timeout above ~3300s) fails loud at fire time. This
-bounds only a SINGLE delegated execution: its target creds are SOPS-sealed into
-the package at fire time and cannot be refreshed mid-build. Automation that runs
-longer overall is already covered - the worker renews STS credentials across the
-run against its three-hour QHOST_CREDS_RENEWAL token (see the QHost service
+## The timeout rule: one number, T
+
+An order's timeout `T` is the one number: the order's `timeout` param, which
+`config0_publisher` `resource/manage_init.py` `_set_build_timeout` reads as the engine
+`TIMEOUT` (default 600). Our code sets every other clock as `T` plus a buffer at the
+moment it makes the call. AWS limits are only an upper bound our clocks never reach.
+
+| Clock | Value | Who sets it, where |
+| --- | --- | --- |
+| `T` | The order's timeout, sent unchanged as the payload's `timeout_seconds` (8th `SimplePayload` field). | `config0_publisher` `resource/manage_init.py` `_set_build_timeout`; `cloud/aws/lambdabuild.py` and `cloud/aws/codebuild_srcfile_helper.py` put `int(self.build_timeout)` on the wire. |
+| Engine deadline | `T`, for the whole execution: package fetch, decrypt, every command. Not a fresh allowance per command. On expiry the engine kills the running command's process group and writes the result marker as `failed` with an error that says the execution timed out at `T` seconds. | Engine `aws_exe_sys/worker/run.py` (the deadline) and `aws_exe_sys/common/subprocess_runner.py` (the kill). One code path for the Lambda target and both CodeBuild delivery modes (`worker/entrypoint.sh`). |
+| Done-marker watch | `T + 120`. The 120 covers the gap between FIRE (when the watch starts) and the delegated runtime's own clock, which starts once the work is queued and provisioned. Only an order that carries no timeout at all falls back to 900 (`defaultEngineWatchTimeout`). | `config0-worker` `internal/consumer/consumer.go` `engineWatchTimeout`. |
+| CodeBuild build timeout, per build | `ceil(T / 60) + 3` minutes (`T + 180`) as the `TimeoutInMinutesOverride`; the Step Functions state timeout is `T + 600` (the 300 queued bound plus a 300 provisioning margin). The CodeBuild project's static `build_timeout` is only a ceiling the override stays under. | Engine `aws_exe_sys/init_job/dispatcher.py` `dispatch_to_codebuild`. |
+| SOPS age key lifetime | `T + 300`, as an SSM `Expiration` policy on the advanced-tier parameter. The engine still deletes the key right after decrypting; the policy only guarantees the key outlives its own call. | `config0_publisher` `cloud/aws/xe_engine.py` `prepare_sops_package` → `store_age_key_in_ssm`. |
+| Target-credential session (`assume_target`) | A separate clock, not derived from the table above: `max(order timeout, engine timeout param) + 300`, floor 900, cap 3600, refused above 3600 (the AWS role-chaining cap: the hub assumes `config0-executor-remote` from its own execution role and STS rejects chained sessions longer than 3600s). | `config0-worker` `internal/consumer/executor.go` `targetCredsDuration` requests it; `config0-hub` `config0_hub/auth/credentials.py` `assume_for_creds_endpoint` floors at 900 and refuses above 3600. |
+| Routing | `T` up to 800 → `lambda`; over 800 → `codebuild`. | `config0_publisher` `resource/tf_exec_shell_helper_main.py` `resolve_build_method`; `cloud/aws/lambdabuild.py` `validate_execution_timeout` refuses a `lambda` fire above 800. |
+| Worker Lambda function timeout | 900: the AWS upper bound, the last layer, never reached. | Engine `infra/02-deploy/lambdas.tf` `aws_lambda_function.worker`. |
+| AWS async retries | 0: AWS never re-invokes `config0-xe-init-job` or `config0-xe-worker`. A Lambda that dies anyway is reported to the on-failure SQS queue, for people to see a death; the order itself is failed by `config0-worker` when no marker arrives by the watch deadline. | Engine `infra/02-deploy/lambdas.tf` `aws_lambda_function_event_invoke_config` (`maximum_retry_attempts = 0`, `on_failure` destination). |
+
+The target-credential session bounds a SINGLE delegated execution: its target creds are
+SOPS-sealed into the package at fire time and cannot be refreshed mid-build. Automation
+that runs longer overall is already covered - the worker renews STS credentials across
+the run against its three-hour QHOST_CREDS_RENEWAL token (see the QHost service
 contract, "Dispatch and credential renewal"), and each delegated execution gets
 freshly minted creds when it fires.
 
