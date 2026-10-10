@@ -7,6 +7,7 @@ import os
 import uuid
 
 import boto3
+from botocore.config import Config
 
 from aws_exe_sys.common.payload import SimplePayload
 
@@ -45,7 +46,15 @@ def _payload_to_dict(payload: SimplePayload) -> dict[str, str]:
 def dispatch_to_lambda(payload: SimplePayload) -> dict:
     """Invoke the worker Lambda with all 11 payload fields."""
     function_name = os.environ["AWS_EXE_SYS_WORKER_LAMBDA"]
-    client = boto3.client("lambda")
+    # botocore retries OFF (CON-74): Lambda Invoke has no idempotency token,
+    # so a default retry of a lost 202 response (ConnectionClosedError,
+    # ReadTimeoutError after Lambda queued the Event) would queue a second
+    # Event and run the worker twice. One attempt, the same shape as the
+    # worker's preparation clients (boto_config_until) and the publisher's
+    # own init-job invoke. The Step Functions dispatch below keeps botocore's
+    # default retries: start_execution reuses one execution name, so a retry
+    # with the same name and input returns the existing execution.
+    client = boto3.client("lambda", config=Config(retries={"total_max_attempts": 1}))
 
     response = client.invoke(
         FunctionName=function_name,

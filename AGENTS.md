@@ -210,28 +210,77 @@ Do NOT invent a different plumbing mechanism for a use case. Concretely:
 ## Asynchronous delegated lifecycle
 
 The asynchronous path is a consumer pass, an S3 watch, and, for a `succeeded` result, a
-second consumer pass:
+second consumer pass.
+
+An order's engine work runs a second time only when the run publisher's runnable gate
+promotes the order again after it was recorded failed or timed out. The order queue
+contract states this rule, the three writes that record the decision, and the accepted
+edges ("Running an order a second time"). The steps below keep to it.
 
 1. **Fire and park.** The consumer claims the order and starts the Python CLI
    subprocess. The stack drives the publisher, which builds the commands, stages the
    package, and invokes `config0-xe-init-job`. The engine runs out of band. The CLI
    exits `135` to report "fired, not finished," and the consumer parks the order in
    the non-terminal `phase2complete` state.
+
+   The fire pass checks the order's execution slot once, before it stages anything
+   (`config0_publisher` `resource/aws_executor_decorator.py`,
+   `resource/aws_executor_status.py` `get_execution_status`). A result in the slot is
+   handled as step 3 says. `initiated` with no result, before the tracking deadline,
+   means a run is live: the pass reports it in progress and parks again without
+   firing. The pass clears the slot and fires only for an empty slot, a passed
+   tracking deadline with no result marker, or a `failed` result (step 3). Both
+   execution targets fire through the decorator's `lambda` branch. It writes
+   `initiated` before the `Event` invoke of `config0-xe-init-job`; a failed write
+   raises, and nothing is invoked. The invoke makes one attempt, with botocore retries
+   off. When the invoke raises:
+
+   - Lambda answered with an error, or the request never went out (`ClientError`, or
+     a `BotoCoreError` that is not an `HTTPClientError`). Nothing was queued. The
+     decorator clears the slot, `initiated` with it, and the next pass fires.
+   - The request went out and the answer was lost (`HTTPClientError`:
+     `ConnectionClosedError`, `ReadTimeoutError`). The `Event` may be queued.
+     `initiated` stays, so later passes do not fire. No done endpoint was recorded,
+     so they cannot park either: each one fails and spends a retry until the result
+     lands (an accepted edge in the order queue contract).
+
+   In both cases the SOPS age key is deleted and the pass fails. The engine's
+   `config0-xe-init-job` starts `config0-xe-worker` with the same one-attempt `Event`
+   invoke (`aws_exe_sys/init_job/dispatcher.py` `dispatch_to_lambda`).
+
 2. **Watch.** The Go `run_publisher` role polls `done_endpoint` with its
    `assume_engine` session. A missing marker means the engine has not finished, so the
    order remains parked. If the marker is still absent at the order's `expire_at`
    deadline, the order is requeued from phase 1 and the engine is fired again, bounded
    by the order's `retries`. Exhausting the retry budget is a hard failure.
+
 3. **Finalize.** When the result marker says `succeeded`, `run_publisher` requeues the
-   order for a second consumer pass (`requeueForPhase2` stamps `engine_phase=finalize`).
-   The Python publisher reads the `ExecutionResult`, the result is recorded through the
-   Python resource path, and the order completes. A `failed` marker on an
-   engine-delegated order goes terminal in `run_publisher` itself
-   (`RecordEngineDoneFailure`, status `failed`, the engine's error as the reason): there
-   is no second pass, and the Python publisher never reads that result. A host order
-   (`group/orders/host*`) is the exception: any result requeues it for the second pass,
-   so its cleanup runs before it goes terminal (`config0-worker`
-   `internal/publisher/publisher.go` `pollEngineJobs`).
+   order for a second consumer pass, the finalize pass (`requeueForPhase2` stamps
+   `engine_phase=finalize`). The Python publisher reads the `ExecutionResult`, the
+   result is recorded through the Python resource path, and the order completes. A
+   `failed` marker on a generic engine-delegated order is recorded by `run_publisher`
+   itself, with no finalize pass (`RecordEngineDoneFailure`: status `failed`, the
+   engine's error as the reason, one retry spent). The row keeps
+   `engine_done_endpoint`, and the slot keeps the failed result. With budget left, the
+   gate promotes the order again. Its next pass is a fire pass, because the row carries
+   no `engine_phase=finalize`: it finds the old `failed` result, clears the slot, and
+   fires in the same pass. A fire pass consumes a `succeeded` result instead of firing,
+   and a finalize pass consumes either result (`config0_publisher`
+   `resource/aws_executor_decorator.py`; `cloud/aws/xe_engine.py` `is_finalize_pass`
+   reads `CONFIG0_ENGINE_PHASE`). A host order (`group/orders/host*`) is the exception:
+   any result requeues it for the finalize pass, so its cleanup runs before it goes
+   terminal (`config0-worker` `internal/publisher/publisher.go` `pollEngineJobs`).
+
+A host order fires through its own path. Its fire pass records the fire as `host_fire`
+on the row, then starts a Step Functions execution in the target account
+(`config0_cli` `handlers/host_order.py`). A later fire pass first asks Step Functions
+about the execution `host_fire` names:
+
+- RUNNING: the pass reuses its `trigger_id` and starts no second execution.
+- SUCCEEDED: the pass starts nothing. It prints the prior done endpoint and exits `135`,
+  so the order parks and its finalize pass consumes the prior result. When that done
+  marker is gone, the pass fails instead of running the job again.
+- Any other state, or no execution: the pass fires with a fresh `trigger_id`.
 
 Exit `135` parks the order at `phase2complete`. What the consumer stores, and what
 `run_publisher` does with it, depends on the line the CLI printed with that exit
@@ -240,7 +289,7 @@ Exit `135` parks the order at `phase2complete`. What the consumer stores, and wh
 
 | The CLI printed | The consumer parks | `run_publisher` |
 | --- | --- | --- |
-| `CONFIG0_ENGINE_DONE_ENDPOINT=<uri>` | `engine_done_endpoint` plus `expire_at`, the done-marker watch deadline. | Reads the S3 result marker: steps 2 and 3 above. |
+| `CONFIG0_ENGINE_DONE_ENDPOINT=<uri>`, with `CONFIG0_ENGINE_EXPIRE_AT=<epoch second>` on the next line (`config0_cli` `handlers/__init__.py` `_emit_done_endpoint`, from the phases JSON `build_expire_at`) | `engine_done_endpoint` plus `expire_at`, the done-marker watch deadline: the publisher's own tracking deadline as the CLI printed it. Only a `135` that carries the endpoint line without the deadline line (a host order, `config0_cli` `handlers/host_order.py`) parks the worker's own `T + 120` instead (`engineWatchTimeout`). | Reads the S3 result marker: steps 2 and 3 above. |
 | `CONFIG0_APPROVAL_WATCH=<watch>` (only a `gitops/tenant/execute` order; `config0_cli` `handlers/gitops.py`) | The approval watch, with no `engine_done_endpoint` and `expire_at` set to `0`, which means no deadline. No engine execution is involved. | Asks QHost for the decision on the run's `pipeline_run` record. A delivered decision, or a head change recorded for the watched checkpoint, requeues the order for the second pass. An absent decision leaves it parked. |
 | Neither line | No watch, and no deadline. | Skips the order on every poll. Only a shellout script or a `sh -c` role command that itself exits `135` reaches this row; a `gitops/tenant/execute` order that does fails instead, with exit code `1`. |
 
@@ -255,9 +304,9 @@ moment it makes the call. AWS limits are only an upper bound our clocks never re
 | --- | --- | --- |
 | `T` | The order's timeout, sent unchanged as the payload's `timeout_seconds` (8th `SimplePayload` field). | `config0_publisher` `resource/manage_init.py` `_set_build_timeout`; `cloud/aws/lambdabuild.py` and `cloud/aws/codebuild_srcfile_helper.py` put `int(self.build_timeout)` on the wire. |
 | Engine deadline | `T`, for the whole execution, counted from the worker's entry: workspace cleanup, package fetch and extraction, the SOPS key fetch and delete, decrypt, every command. Not a fresh allowance per command. On expiry the engine kills the running command's process group (or the running `sops --decrypt`), ends a stalled preparation call (a connect or read that delivers nothing, on a one-attempt client whose timeouts are the time left), and writes the result marker as `failed` with an error that says the execution timed out at `T` seconds. A preparation call that is still delivering, a response that keeps sending bytes slowly or one large package member already extracting, may finish past `T` before the next check: accepted, because the Lambda function timeout, the CodeBuild build timeout and the publisher tracking deadline still end the order. | Engine `aws_exe_sys/worker/run.py` (the deadline, the fetch and extraction checks), `aws_exe_sys/common/subprocess_runner.py` (the kill, `boto_config_until`, `until_deadline`) and `aws_exe_sys/common/sops.py` (the SSM calls and `sops --decrypt`). One code path for the Lambda target and both CodeBuild delivery modes (`worker/entrypoint.sh`). |
-| Done-marker watch | `T + 120`. The 120 covers the gap between FIRE (when the watch starts) and the delegated runtime's own clock, which starts once the work is queued and provisioned. Only an order that carries no timeout at all falls back to 900 (`defaultEngineWatchTimeout`). | `config0-worker` `internal/consumer/consumer.go` `engineWatchTimeout`. |
-| Publisher tracking deadline | `T + 120`, the same buffer as the done-marker watch, set when the call is made: after staging, once the engine has accepted the invoke, never before. The async decorator stores it as the `expire_at` tracking marker; the `sync=True` poll runs until it. The status reader checks the engine's result marker before declaring an execution `expired`, so a marker the engine wrote at its own deadline `T` is read as the result, never discarded. | `config0_publisher` `cloud/aws/xe_engine.py` `ENGINE_TRACKING_MARGIN_SECONDS`; `resource/aws_executor_decorator.py` (`build_expire_at`); `cloud/aws/lambdabuild.py` `_submit`; `resource/aws_executor_status.py` `get_execution_status`. |
-| CodeBuild build timeout, per build | `ceil(T / 60) + 3` minutes (`T + 180`) as the `TimeoutInMinutesOverride`; the Step Functions state timeout is `T + 600` (the 300 queued bound plus a 300 provisioning margin). The CodeBuild project's static `build_timeout` is only a ceiling the override stays under. | Engine `aws_exe_sys/init_job/dispatcher.py` `dispatch_to_codebuild`. |
+| Done-marker watch | The publisher tracking deadline, the row below, handed over unchanged: the CLI prints it as `CONFIG0_ENGINE_EXPIRE_AT=` next to the done endpoint and the consumer parks it as the order's `expire_at`. `T + 120` on the `lambda` target, `T + 600 + 120` on the `codebuild` target. The execution target is the publisher's decision (`resolve_build_method`: `T` over 800, or `USE_CODEBUILD`); the Go worker never recomputes it. The worker's own `T + 120` (`engineWatchTimeout`) is the fallback for a `135` without a deadline line, a host order; only an order that carries no timeout at all falls back to 900 (`defaultEngineWatchTimeout`). | `config0_cli` `handlers/__init__.py` `_emit_done_endpoint`; `config0-worker` `internal/consumer/executor.go` `doneEndpointMetadata` (`parseExpireAt`), `internal/consumer/consumer.go` `engineWatchTimeout` (the fallback). |
+| Publisher tracking deadline | `T` plus the execution target's buffer, read from the payload's `execution_target`: `T + 120` on `lambda`; `T + 600 + 120` on `codebuild`, where the engine's clock `T` starts at worker entry, after CodeBuild's queue (the 300 queued bound) and provisioning (the 300 margin), the same 600 the Step Functions state allows above `T`. Set when the call is made: after staging, once the engine has accepted the invoke, never before. The async decorator stores it as the `expire_at` tracking marker and in the phases JSON as `build_expire_at`, which the CLI hands to the consumer as the done-marker watch, so the two clocks are one; the `sync=True` poll runs until it. The status reader checks the engine's result marker before declaring an execution `expired`, so a marker the engine wrote at its own deadline `T` is read as the result, never discarded. | `config0_publisher` `cloud/aws/xe_engine.py` `ENGINE_TRACKING_MARGIN_SECONDS`, `CODEBUILD_START_MARGIN_SECONDS`, `engine_tracking_margin_seconds`; `resource/aws_executor_decorator.py` (`build_expire_at`); `cloud/aws/lambdabuild.py` `_submit`; `resource/aws_executor_status.py` `get_execution_status`. |
+| CodeBuild build timeout, per build | `ceil(T / 60) + 3` minutes (`T + 180`) as the `TimeoutInMinutesOverride`; the Step Functions state timeout is `T + 600` (the 300 queued bound plus a 300 provisioning margin). The CodeBuild project's static `build_timeout` is only a ceiling the override stays under. A state that times out raises `States.Timeout`, which the task's `Catch` on `States.ALL` routes to `FinalizeResult`, so the finalizer writes the `failed` fallback marker (`codebuild_timed_out_without_result`) when the worker wrote none: a CodeBuild run that never finishes still produces a marker inside `T + 600` plus the finalizer's own seconds, before the `T + 600 + 120` watch. | Engine `aws_exe_sys/init_job/dispatcher.py` `dispatch_to_codebuild` (`_SFN_TIMEOUT_MARGIN_SECONDS`); `infra/02-deploy/step_functions.tf` `RunCodeBuild` / `RunCodeBuildDirect` (`TimeoutSecondsPath`, `Catch`), `FinalizeResult`; `aws_exe_sys/finalizer/handler.py`. |
 | SOPS age key lifetime | `T + 300`, as an SSM `Expiration` policy on the advanced-tier parameter. The engine still deletes the key right after decrypting; the policy only guarantees the key outlives its own call. | `config0_publisher` `cloud/aws/xe_engine.py` `prepare_sops_package` → `store_age_key_in_ssm`. |
 | Target-credential session (`assume_target`) | A separate clock, not derived from the table above: `max(order timeout, engine timeout param) + 300`, floor 900, cap 3600, refused above 3600 (the AWS role-chaining cap: the hub assumes `config0-executor-remote` from its own execution role and STS rejects chained sessions longer than 3600s). | `config0-worker` `internal/consumer/executor.go` `targetCredsDuration` requests it; `config0-hub` `config0_hub/auth/credentials.py` `assume_for_creds_endpoint` floors at 900 and refuses above 3600. |
 | Routing | `T` up to 800 → `lambda`; over 800 → `codebuild`. | `config0_publisher` `resource/tf_exec_shell_helper_main.py` `resolve_build_method`; `cloud/aws/lambdabuild.py` `validate_execution_timeout` refuses a `lambda` fire above 800. |
