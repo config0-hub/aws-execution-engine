@@ -301,3 +301,39 @@ class TestExecutionMode:
     def test_from_dict_preserves_direct(self):
         p = SimplePayload.from_dict({"execution_mode": "direct"})
         assert p.execution_mode == "direct"
+
+
+class TestComputeType:
+    """compute_type (12th field, wire contract v5.2) - the per-build CodeBuild ComputeTypeOverride."""
+
+    def test_absent_by_default(self):
+        p = _valid_payload()
+        assert p.compute_type is None
+        p.validate()
+
+    def test_every_linux_container_compute_type_passes_on_both_targets(self):
+        for compute_type in (
+            "BUILD_GENERAL1_SMALL",
+            "BUILD_GENERAL1_MEDIUM",
+            "BUILD_GENERAL1_LARGE",
+            "BUILD_GENERAL1_XLARGE",
+            "BUILD_GENERAL1_2XLARGE",
+        ):
+            for target in ("lambda", "codebuild"):
+                p = _valid_payload(execution_target=target, compute_type=compute_type)
+                p.validate()
+
+    def test_other_value_rejected(self):
+        for bad in ("small", "build_general1_small", "BUILD_LAMBDA_1GB", "ATTRIBUTE_BASED_COMPUTE", "7GB"):
+            p = _valid_payload(execution_target="codebuild", compute_type=bad)
+            with pytest.raises(PayloadValidationError, match="compute_type must be one of"):
+                p.validate()
+
+    def test_from_dict_coerces_null_placeholders(self):
+        for placeholder in ("", "null", "none", None):
+            p = SimplePayload.from_dict({"compute_type": placeholder})
+            assert p.compute_type is None
+
+    def test_from_dict_preserves_value(self):
+        p = SimplePayload.from_dict({"compute_type": "BUILD_GENERAL1_LARGE"})
+        assert p.compute_type == "BUILD_GENERAL1_LARGE"

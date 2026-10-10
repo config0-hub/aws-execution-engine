@@ -28,6 +28,7 @@ resource "aws_lambda_function" "init_job" {
       {
         AWS_EXE_SYS_WORKER_LAMBDA               = "${local.prefix}-worker"
         AWS_EXE_SYS_CODEBUILD_STATE_MACHINE_ARN = aws_sfn_state_machine.codebuild.arn
+        AWS_EXE_SYS_CODEBUILD_COMPUTE_TYPE      = local.codebuild_compute
       },
     )
   }

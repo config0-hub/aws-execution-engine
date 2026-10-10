@@ -69,9 +69,10 @@ locals {
     callback_url     = ""
     callback_token   = ""
     execution_mode   = ""
+    compute_type     = ""
   }
 
-  # The one shared 11-entry EnvironmentVariablesOverride list, built from the
+  # The one shared 12-entry EnvironmentVariablesOverride list, built from the
   # codebuild_payload_defaults keys above. BOTH Task states (RunCodeBuild and
   # RunCodeBuildDirect) carry exactly this list - the four direct-only env
   # vars (ENGINE_ZIP_S3_BUCKET / ENGINE_ZIP_S3_KEY / SOPS_URL / AGE_URL) are
@@ -132,6 +133,11 @@ locals {
       "Value.$" = "$.execution_mode"
       Type      = "PLAINTEXT"
     },
+    {
+      Name      = "COMPUTE_TYPE"
+      "Value.$" = "$.compute_type"
+      Type      = "PLAINTEXT"
+    },
   ]
 }
 
@@ -147,7 +153,7 @@ resource "aws_sfn_state_machine" "codebuild" {
       NormalizePayload = {
         Type = "Pass"
         # Defaults-normalization: shallow-merge empty-string defaults for all
-        # eleven payload keys UNDER the execution input (input wins), so every
+        # twelve payload keys UNDER the execution input (input wins), so every
         # JSONPath the Choice and task states reference always resolves and
         # uncatchable States.Runtime templating failures cannot occur. The
         # defaults do NOT mask real requirements: an empty trigger_id /
@@ -193,6 +199,10 @@ resource "aws_sfn_state_machine" "codebuild" {
           # minutes) by the dispatcher; the project's static build_timeout is
           # only a generous ceiling the override stays under.
           "TimeoutInMinutesOverride.$" = "$.build_timeout_minutes"
+          # Per-build compute size: the dispatcher always sets compute_type
+          # (the payload's value, else the project's own compute type), so
+          # this override is never empty.
+          "ComputeTypeOverride.$"      = "$.compute_type"
           EnvironmentVariablesOverride = local.codebuild_env_overrides
         }
         ResultSelector = {
@@ -210,7 +220,7 @@ resource "aws_sfn_state_machine" "codebuild" {
       }
       RunCodeBuildDirect = {
         # Direct mode (execution_mode = "direct"): START-time identical to
-        # RunCodeBuild - same project, same shared 11-entry env-override list,
+        # RunCodeBuild - same project, same shared 12-entry env-override list,
         # same Catch -> FinalizeResult, same sfn_timeout_seconds /
         # build_timeout_minutes threading - PLUS the eight direct-only
         # StartBuild Parameters below, which exist ONLY on this Task: the
@@ -225,6 +235,7 @@ resource "aws_sfn_state_machine" "codebuild" {
         Parameters = {
           ProjectName                      = aws_codebuild_project.worker.name
           "TimeoutInMinutesOverride.$"     = "$.build_timeout_minutes"
+          "ComputeTypeOverride.$"          = "$.compute_type"
           BuildspecOverride                = local.direct_mode_buildspec
           ImageOverride                    = "aws/codebuild/standard:7.0"
           PrivilegedModeOverride           = true

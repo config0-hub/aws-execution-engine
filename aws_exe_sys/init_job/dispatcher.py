@@ -25,6 +25,7 @@ _PAYLOAD_FIELDS = (
     "callback_url",
     "callback_token",
     "execution_mode",
+    "compute_type",
 )
 
 # Margin added on top of timeout_seconds for the per-build CodeBuild override
@@ -44,7 +45,7 @@ def _payload_to_dict(payload: SimplePayload) -> dict[str, str]:
 
 
 def dispatch_to_lambda(payload: SimplePayload) -> dict:
-    """Invoke the worker Lambda with all 11 payload fields."""
+    """Invoke the worker Lambda with all 12 payload fields."""
     function_name = os.environ["AWS_EXE_SYS_WORKER_LAMBDA"]
     # botocore retries OFF (CON-74): Lambda Invoke has no idempotency token,
     # so a default retry of a lost 202 response (ConnectionClosedError,
@@ -74,11 +75,16 @@ def dispatch_to_codebuild(payload: SimplePayload) -> dict:
     client = boto3.client("stepfunctions")
     execution_name = f"aws-exe-{uuid.uuid4().hex}"
 
-    # The 11 payload fields ride as strings (CodeBuild env transport). The two
+    # The 12 payload fields ride as strings (CodeBuild env transport). The two
     # derived numeric fields are computed here because the state machine's
     # JSONPath cannot do arithmetic: the per-build CodeBuild timeout override
     # and the Step Functions state timeout both follow timeout_seconds.
     sfn_input: dict[str, object] = dict(_payload_to_dict(payload))
+    # compute_type is always set here: the state machine passes it as the
+    # per-build ComputeTypeOverride on every StartBuild, and StartBuild rejects
+    # an empty value, so an absent field takes the project's own compute type
+    # (the same value Terraform set on the CodeBuild project).
+    sfn_input["compute_type"] = payload.compute_type or os.environ["AWS_EXE_SYS_CODEBUILD_COMPUTE_TYPE"]
     sfn_input["build_timeout_minutes"] = (
         math.ceil(payload.timeout_seconds / 60) + _CODEBUILD_TIMEOUT_MARGIN_MINUTES
     )
