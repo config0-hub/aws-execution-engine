@@ -1,9 +1,12 @@
 """Unit tests for aws_exe_sys/init_job/dispatcher.py."""
 
 import base64
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import threading
 from unittest.mock import MagicMock, patch
 
+from botocore.exceptions import ConnectionClosedError
 import pytest
 
 from aws_exe_sys.common.payload import SimplePayload
@@ -100,7 +103,9 @@ class TestDispatchToLambda:
         response = dispatch_to_lambda(payload)
 
         assert response["StatusCode"] == 202
-        mock_boto3.client.assert_called_once_with("lambda")
+        mock_boto3.client.assert_called_once()
+        assert mock_boto3.client.call_args.args == ("lambda",)
+        assert mock_boto3.client.call_args.kwargs["config"].retries == {"total_max_attempts": 1}
         mock_client.invoke.assert_called_once()
 
     @patch("aws_exe_sys.init_job.dispatcher.boto3")
@@ -131,6 +136,56 @@ class TestDispatchToLambda:
         assert sent_payload["callback_token"] == ""
         assert sent_payload["execution_mode"] == ""
         assert len(sent_payload) == 11
+
+
+class _DroppingLambdaHandler(BaseHTTPRequestHandler):
+    """A Lambda endpoint over real HTTP that records each Invoke POST and
+    closes the socket without a reply: the 202 is lost after the Event
+    could have been queued."""
+
+    protocol_version = "HTTP/1.1"
+    invocations: list[dict] = []
+
+    def log_message(self, *_args):
+        pass
+
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers["Content-Length"]))
+        self.invocations.append(json.loads(body))
+        self.close_connection = True
+        self.connection.close()
+
+
+@pytest.fixture
+def dropping_lambda(monkeypatch):
+    """Point boto3's Lambda client at the dropping stand-in over real HTTP."""
+    _DroppingLambdaHandler.invocations = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _DroppingLambdaHandler)
+    server.daemon_threads = True
+    server.handle_error = lambda *_args: None  # the dropped socket is the test, not noise
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setenv("AWS_ENDPOINT_URL_LAMBDA", f"http://127.0.0.1:{server.server_port}")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+    monkeypatch.setenv("AWS_EXE_SYS_WORKER_LAMBDA", "my-worker-fn")
+    yield _DroppingLambdaHandler
+    server.shutdown()
+
+
+class TestDispatchToLambdaSingleAttempt:
+    """CON-74: the init-job starts the worker at most once. Lambda Invoke has
+    no idempotency token, so when the endpoint drops the connection after
+    the request went out, the real boto3 client raises once and sends no
+    second Invoke; botocore's default retry would have queued a second Event."""
+
+    def test_a_dropped_connection_is_one_attempt(self, dropping_lambda):
+        with pytest.raises(ConnectionClosedError):
+            dispatch_to_lambda(_valid_payload(execution_target="lambda"))
+
+        assert len(dropping_lambda.invocations) == 1, "botocore retries are off"
+        assert dropping_lambda.invocations[0]["trigger_id"] == "trg-001"
 
 
 class TestDispatchToCodeBuild:
