@@ -4,8 +4,8 @@
 
 This contract defines how a config0 order reaches the generic AWS execution engine,
 how asynchronous work returns to the order queue, and which component owns each part
-of the run. The engine's payload (eight required fields, plus three optional fields as
-of CONTRACT.md v5.1) and result shapes are defined in
+of the run. The engine's payload (eight required fields, plus four optional fields as
+of CONTRACT.md v5.2) and result shapes are defined in
 `src/delegated-execution-components/aws-execution-engine/CONTRACT.md`; this contract
 cross-references that document rather than duplicating its field-by-field rules.
 
@@ -45,9 +45,10 @@ sync or async field in `SimplePayload`.
 
 For delegated work, the publisher sends the `SimplePayload` to `config0-xe-init-job`:
 eight required fields (`trigger_id`, `s3_package_uri`, `sops_type`, `sops_path`,
-`commands_b64`, `done_endpoint`, `execution_target`, `timeout_seconds`) plus three
-optional fields — `callback_url` and `callback_token` (engine CONTRACT.md v5.0), and
-`execution_mode` (engine CONTRACT.md v5.1, the 11th field). `config0_publisher` does
+`commands_b64`, `done_endpoint`, `execution_target`, `timeout_seconds`) plus four
+optional fields — `callback_url` and `callback_token` (engine CONTRACT.md v5.0),
+`execution_mode` (engine CONTRACT.md v5.1, the 11th field), and `compute_type`
+(engine CONTRACT.md v5.2, the 12th field). `config0_publisher` does
 not set `callback_url`/`callback_token` today, so absent-means-unchanged behavior
 applies to those two for every delegated order in this codebase; a future caller may
 opt in. `execution_mode` is set conditionally: the CodeBuild srcfile helper
@@ -61,8 +62,16 @@ path at the Step Functions dispatch level instead — it requires
 `execution_target="codebuild"` (the engine rejects `"direct"` paired with
 `execution_target="lambda"`), and it changes nothing about command execution: the
 worker container still runs `commands_b64` exactly as in every other mode, and no
-in-container handler ever reads `execution_mode` — it is dispatch-only. See the
-engine's own CONTRACT.md v5.1 for the full field table and the SFN `Choice`-branch
+in-container handler ever reads `execution_mode` — it is dispatch-only.
+`compute_type` is the order's CodeBuild compute size, one of the five AWS
+`BUILD_GENERAL1_SMALL|MEDIUM|LARGE|XLARGE|2XLARGE` values, sent only when the order
+sets one (the stack argument `compute_type`, the order env `BUILD_COMPUTE_TYPE`;
+`config0_publisher` `resource/manage_init.py` `_set_build_compute_type` reads and
+validates it at helper init, before any staging write) and omitted otherwise, so the
+engine's own CodeBuild project default applies; it is honoured on the `codebuild`
+target only (the `ComputeTypeOverride` on `StartBuild`), the `lambda` target ignores
+it, and the init-job refuses any other value with `PayloadValidationError`. See the
+engine's own CONTRACT.md v5.2 for the full field table and the SFN `Choice`-branch
 mechanics; this contract does not restate them. The dispatcher validates the payload
 and selects the execution target:
 
@@ -73,7 +82,7 @@ and selects the execution target:
   directly: it starts the Standard Step
   Functions state machine named by `AWS_EXE_SYS_CODEBUILD_STATE_MACHINE_ARN` on
   `init_job`, and that workflow runs the managed CodeBuild project with
-  `codebuild:startBuild.sync`, passing all eleven payload fields as plain-string
+  `codebuild:startBuild.sync`, passing all twelve payload fields as plain-string
   environment overrides, then invokes the finalizer. When `execution_mode="direct"`,
   the workflow's `Choice` state routes to a second, structurally distinct Task
   (`RunCodeBuildDirect`) that adds its own `StartBuild` overrides — see the engine
@@ -309,7 +318,7 @@ moment it makes the call. AWS limits are only an upper bound our clocks never re
 | CodeBuild build timeout, per build | `ceil(T / 60) + 3` minutes (`T + 180`) as the `TimeoutInMinutesOverride`; the Step Functions state timeout is `T + 600` (the 300 queued bound plus a 300 provisioning margin). The CodeBuild project's static `build_timeout` is only a ceiling the override stays under. A state that times out raises `States.Timeout`, which the task's `Catch` on `States.ALL` routes to `FinalizeResult`, so the finalizer writes the `failed` fallback marker (`codebuild_timed_out_without_result`) when the worker wrote none: a CodeBuild run that never finishes still produces a marker inside `T + 600` plus the finalizer's own seconds, before the `T + 600 + 120` watch. | Engine `aws_exe_sys/init_job/dispatcher.py` `dispatch_to_codebuild` (`_SFN_TIMEOUT_MARGIN_SECONDS`); `infra/02-deploy/step_functions.tf` `RunCodeBuild` / `RunCodeBuildDirect` (`TimeoutSecondsPath`, `Catch`), `FinalizeResult`; `aws_exe_sys/finalizer/handler.py`. |
 | SOPS age key lifetime | `T + 300`, as an SSM `Expiration` policy on the advanced-tier parameter. The engine still deletes the key right after decrypting; the policy only guarantees the key outlives its own call. | `config0_publisher` `cloud/aws/xe_engine.py` `prepare_sops_package` → `store_age_key_in_ssm`. |
 | Target-credential session (`assume_target`) | A separate clock, not derived from the table above: `max(order timeout, engine timeout param) + 300`, floor 900, cap 3600, refused above 3600 (the AWS role-chaining cap: the hub assumes `config0-executor-remote` from its own execution role and STS rejects chained sessions longer than 3600s). | `config0-worker` `internal/consumer/executor.go` `targetCredsDuration` requests it; `config0-hub` `config0_hub/auth/credentials.py` `assume_for_creds_endpoint` floors at 900 and refuses above 3600. |
-| Routing | `T` up to 800 → `lambda`; over 800 → `codebuild`. | `config0_publisher` `resource/tf_exec_shell_helper_main.py` `resolve_build_method`; `cloud/aws/lambdabuild.py` `validate_execution_timeout` refuses a `lambda` fire above 800. |
+| Routing | `T` up to 800 → `lambda`; over 800 → `codebuild`. The compute size on `codebuild` is a separate, per-order choice: the stack argument `compute_type` / order env `BUILD_COMPUTE_TYPE` (AWS `BUILD_GENERAL1_*` values), absent = the engine's project default. | `config0_publisher` `resource/tf_exec_shell_helper_main.py` `resolve_build_method`; `cloud/aws/lambdabuild.py` `validate_execution_timeout` refuses a `lambda` fire above 800. |
 | Worker Lambda function timeout | 900: the AWS upper bound, the last layer, never reached. | Engine `infra/02-deploy/lambdas.tf` `aws_lambda_function.worker`. |
 | AWS async retries | 0: AWS never re-invokes `config0-xe-init-job` or `config0-xe-worker`. The async invoke's maximum event age is 60 seconds: an invoke the Lambda service cannot start within a minute is reported as a death, not started later against an order `config0-worker` has already failed. A Lambda that dies anyway is reported to the on-failure SQS queue, for people to see a death; the order itself is failed by `config0-worker` when no marker arrives by the watch deadline. | Engine `infra/02-deploy/lambdas.tf` `aws_lambda_function_event_invoke_config` (`maximum_event_age_in_seconds = 60`, `maximum_retry_attempts = 0`, `on_failure` destination). |
 
