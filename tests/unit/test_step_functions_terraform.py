@@ -226,7 +226,7 @@ def test_state_machine_uses_standard_sync_codebuild_and_finalizer():
     assert "IfNoneMatch" not in source
 
 
-def test_shared_override_list_has_exactly_eleven_plaintext_entries():
+def test_shared_override_list_has_exactly_twelve_plaintext_entries():
     source = STATE_MACHINE_TERRAFORM.read_text()
 
     expected_names = [
@@ -241,20 +241,21 @@ def test_shared_override_list_has_exactly_eleven_plaintext_entries():
         "CALLBACK_URL",
         "CALLBACK_TOKEN",
         "EXECUTION_MODE",
+        "COMPUTE_TYPE",
     ]
     shared_block = source.split("codebuild_env_overrides = [")[1].split("\n  ]")[0]
     for name in expected_names:
         assert shared_block.count(f'Name      = "{name}"') == 1
-    assert shared_block.count('Type      = "PLAINTEXT"') == 11
+    assert shared_block.count('Type      = "PLAINTEXT"') == 12
 
 
-def test_both_tasks_carry_the_identical_shared_eleven_entry_list():
+def test_both_tasks_carry_the_identical_shared_twelve_entry_list():
     source = STATE_MACHINE_TERRAFORM.read_text()
 
     default_task = _task_block(source, "RunCodeBuild")
     direct_task = _task_block(source, "RunCodeBuildDirect")
 
-    # Both Task states reference the SAME shared local, so the 11-entry base
+    # Both Task states reference the SAME shared local, so the 12-entry base
     # list is identical by construction; the direct Task only APPENDS its four
     # static entries via concat.
     assert "EnvironmentVariablesOverride = local.codebuild_env_overrides" in default_task
@@ -276,18 +277,19 @@ def test_choice_state_branches_on_execution_mode_before_either_task():
     assert 'Default = "RunCodeBuild"' in route
 
 
-def test_default_task_parameters_differ_from_baseline_only_by_execution_mode_entry():
+def test_default_task_parameters_differ_from_baseline_only_by_execution_mode_and_compute_type():
     source = STATE_MACHINE_TERRAFORM.read_text()
 
     default_task = _task_block(source, "RunCodeBuild")
     params = default_task.split("Parameters = {")[1].split("\n        }")[0]
 
     # Field-by-field against the pre-Phase-1 baseline: exactly ProjectName,
-    # TimeoutInMinutesOverride, and the env-override list (which gains the one
-    # EXECUTION_MODE entry via the shared local, 10 -> 11). No direct-only
-    # keys.
+    # TimeoutInMinutesOverride, ComputeTypeOverride (v5.2), and the
+    # env-override list (which gains the EXECUTION_MODE and COMPUTE_TYPE
+    # entries via the shared local, 10 -> 12). No direct-only keys.
     assert "ProjectName = aws_codebuild_project.worker.name" in params
     assert '"TimeoutInMinutesOverride.$" = "$.build_timeout_minutes"' in params
+    assert '"ComputeTypeOverride.$"      = "$.compute_type"' in params
     assert "EnvironmentVariablesOverride = local.codebuild_env_overrides" in params
     for forbidden in (
         "BuildspecOverride",
@@ -300,10 +302,15 @@ def test_default_task_parameters_differ_from_baseline_only_by_execution_mode_ent
         "AGE_URL",
     ):
         assert forbidden not in default_task, f"{forbidden} leaked onto RunCodeBuild"
-    # Nothing beyond the three expected Parameters keys.
+    # Nothing beyond the four expected Parameters keys.
     raw_keys = re.findall(r"^ {10}(\S+) *=", params, re.M)
     param_keys = {k.strip('"').removesuffix(".$") for k in raw_keys}
-    assert param_keys == {"ProjectName", "TimeoutInMinutesOverride", "EnvironmentVariablesOverride"}
+    assert param_keys == {
+        "ProjectName",
+        "TimeoutInMinutesOverride",
+        "ComputeTypeOverride",
+        "EnvironmentVariablesOverride",
+    }
 
     # Non-Parameters fields unchanged from baseline.
     assert 'TimeoutSecondsPath = "$.sfn_timeout_seconds"' in default_task
@@ -343,6 +350,7 @@ def test_direct_task_shares_catch_and_timeout_threading_with_default_task():
         # fmt alignment differs between the two Parameters blocks - assert the
         # key/value pair, not the exact padding.
         assert re.search(r'"TimeoutInMinutesOverride\.\$"\s+= "\$\.build_timeout_minutes"', block)
+        assert re.search(r'"ComputeTypeOverride\.\$"\s+= "\$\.compute_type"', block)
         assert 'ErrorEquals = ["States.ALL"]' in block
         assert 'ResultPath  = "$.terminal_context"' in block
         assert 'Next        = "FinalizeResult"' in block
@@ -354,7 +362,7 @@ def test_state_machine_normalizes_missing_payload_keys_before_codebuild():
 
     # A missing input key makes a field-level JSONPath reference throw
     # States.Runtime, which Catch cannot intercept; the NormalizePayload Pass
-    # state must merge defaults for all eleven payload keys before the Choice
+    # state must merge defaults for all twelve payload keys before the Choice
     # or either task runs.
     assert 'StartAt = "NormalizePayload"' in source
     assert "States.JsonMerge(States.StringToJson(" in source
@@ -372,6 +380,7 @@ def test_state_machine_normalizes_missing_payload_keys_before_codebuild():
         "callback_url",
         "callback_token",
         "execution_mode",
+        "compute_type",
     }
     defaults_block = source.split("codebuild_payload_defaults = {")[1].split("}")[0]
     for key in expected_default_keys:
@@ -458,46 +467,51 @@ def test_rendered_flow_is_normalize_then_choice_then_both_tasks(rendered_asl):
         assert task["Next"] == "FinalizeResult"
 
 
-def test_rendered_tasks_share_the_identical_eleven_entry_base_list(rendered_asl):
+def test_rendered_tasks_share_the_identical_twelve_entry_base_list(rendered_asl):
     states = rendered_asl["States"]
     default_env = states["RunCodeBuild"]["Parameters"]["EnvironmentVariablesOverride"]
     direct_env = states["RunCodeBuildDirect"]["Parameters"]["EnvironmentVariablesOverride"]
 
-    expected_names = _PRE_DIRECT_MODE_ENV_NAMES + ["EXECUTION_MODE"]
+    expected_names = _PRE_DIRECT_MODE_ENV_NAMES + ["EXECUTION_MODE", "COMPUTE_TYPE"]
     assert [entry["Name"] for entry in default_env] == expected_names
     # The direct task's list starts with the structurally identical base list.
     assert direct_env[: len(default_env)] == default_env
 
-    expected_paths = dict(_PRE_DIRECT_MODE_ENV_PATHS, EXECUTION_MODE="$.execution_mode")
+    expected_paths = dict(
+        _PRE_DIRECT_MODE_ENV_PATHS, EXECUTION_MODE="$.execution_mode", COMPUTE_TYPE="$.compute_type"
+    )
     for entry in default_env:
         assert entry["Value.$"] == expected_paths[entry["Name"]]
         assert entry["Type"] == "PLAINTEXT"
         assert set(entry) == {"Name", "Value.$", "Type"}
 
 
-def test_rendered_default_task_matches_baseline_plus_execution_mode_only(rendered_asl):
+def test_rendered_default_task_matches_baseline_plus_execution_mode_and_compute_type(rendered_asl):
     task = rendered_asl["States"]["RunCodeBuild"]
     params = task["Parameters"]
 
-    # Exactly the pre-direct-mode Parameters shape: the same three keys, no
-    # direct-only override keys.
+    # The pre-direct-mode Parameters shape plus the v5.2 ComputeTypeOverride:
+    # four keys, no direct-only override keys.
     assert set(params) == {
         "ProjectName",
         "TimeoutInMinutesOverride.$",
+        "ComputeTypeOverride.$",
         "EnvironmentVariablesOverride",
     }
     assert params["ProjectName"] == _SENTINELS["aws_codebuild_project.worker.name"]
     assert params["TimeoutInMinutesOverride.$"] == "$.build_timeout_minutes"
+    assert params["ComputeTypeOverride.$"] == "$.compute_type"
 
-    # The env list is the pre-direct-mode ten entries plus exactly the one
-    # EXECUTION_MODE entry - no other drift.
+    # The env list is the pre-direct-mode ten entries plus exactly the
+    # EXECUTION_MODE and COMPUTE_TYPE entries - no other drift.
     env = params["EnvironmentVariablesOverride"]
     baseline = [
         {"Name": name, "Value.$": _PRE_DIRECT_MODE_ENV_PATHS[name], "Type": "PLAINTEXT"}
         for name in _PRE_DIRECT_MODE_ENV_NAMES
     ]
     assert env == baseline + [
-        {"Name": "EXECUTION_MODE", "Value.$": "$.execution_mode", "Type": "PLAINTEXT"}
+        {"Name": "EXECUTION_MODE", "Value.$": "$.execution_mode", "Type": "PLAINTEXT"},
+        {"Name": "COMPUTE_TYPE", "Value.$": "$.compute_type", "Type": "PLAINTEXT"},
     ]
 
     # Non-Parameters plumbing unchanged from baseline.
@@ -529,8 +543,9 @@ def test_rendered_direct_task_carries_exactly_the_direct_only_additions(rendered
     assert direct_params["ImagePullCredentialsTypeOverride"] == "CODEBUILD"
     assert direct_params["ProjectName"] == default_params["ProjectName"]
     assert direct_params["TimeoutInMinutesOverride.$"] == "$.build_timeout_minutes"
+    assert direct_params["ComputeTypeOverride.$"] == "$.compute_type"
 
-    # Env list: exactly the shared eleven followed by exactly the four
+    # Env list: exactly the shared twelve followed by exactly the four
     # direct-only static env vars, in order, with plain Value (not Value.$).
     env = direct_params["EnvironmentVariablesOverride"]
     base_len = len(default_params["EnvironmentVariablesOverride"])
@@ -559,7 +574,7 @@ def test_rendered_direct_task_carries_exactly_the_direct_only_additions(rendered
     ]
 
 
-def test_rendered_normalize_pass_merges_defaults_for_all_eleven_keys(rendered_asl):
+def test_rendered_normalize_pass_merges_defaults_for_all_twelve_keys(rendered_asl):
     normalize = rendered_asl["States"]["NormalizePayload"]
     merged_expr = normalize["Parameters"]["merged.$"]
     assert merged_expr.startswith("States.JsonMerge(States.StringToJson('")
@@ -578,5 +593,6 @@ def test_rendered_normalize_pass_merges_defaults_for_all_eleven_keys(rendered_as
         "callback_url": "",
         "callback_token": "",
         "execution_mode": "",
+        "compute_type": "",
     }
     assert normalize["OutputPath"] == "$.merged"

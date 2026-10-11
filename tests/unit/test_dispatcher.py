@@ -38,7 +38,7 @@ def _valid_payload(**overrides) -> SimplePayload:
 
 
 class TestPayloadToDict:
-    def test_all_11_fields_present(self):
+    def test_all_12_fields_present(self):
         payload = _valid_payload()
         d = _payload_to_dict(payload)
         assert set(d.keys()) == {
@@ -53,6 +53,7 @@ class TestPayloadToDict:
             "callback_url",
             "callback_token",
             "execution_mode",
+            "compute_type",
         }
         assert d["trigger_id"] == "trg-001"
         assert d["timeout_seconds"] == "3600"
@@ -79,6 +80,16 @@ class TestPayloadToDict:
         payload = _valid_payload(execution_target="codebuild", execution_mode="direct")
         d = _payload_to_dict(payload)
         assert d["execution_mode"] == "direct"
+
+    def test_absent_compute_type_becomes_empty_string(self):
+        payload = _valid_payload()
+        d = _payload_to_dict(payload)
+        assert d["compute_type"] == ""
+
+    def test_compute_type_rides_as_plain_string(self):
+        payload = _valid_payload(execution_target="codebuild", compute_type="BUILD_GENERAL1_LARGE")
+        d = _payload_to_dict(payload)
+        assert d["compute_type"] == "BUILD_GENERAL1_LARGE"
 
     def test_callback_fields_present(self):
         payload = _valid_payload(
@@ -109,7 +120,7 @@ class TestDispatchToLambda:
         mock_client.invoke.assert_called_once()
 
     @patch("aws_exe_sys.init_job.dispatcher.boto3")
-    def test_passes_all_11_fields_in_payload(self, mock_boto3, monkeypatch):
+    def test_passes_all_12_fields_in_payload(self, mock_boto3, monkeypatch):
         monkeypatch.setenv("AWS_EXE_SYS_WORKER_LAMBDA", "my-worker-fn")
 
         mock_client = MagicMock()
@@ -135,7 +146,8 @@ class TestDispatchToLambda:
         assert sent_payload["callback_url"] == ""
         assert sent_payload["callback_token"] == ""
         assert sent_payload["execution_mode"] == ""
-        assert len(sent_payload) == 11
+        assert sent_payload["compute_type"] == ""
+        assert len(sent_payload) == 12
 
 
 class _DroppingLambdaHandler(BaseHTTPRequestHandler):
@@ -189,6 +201,10 @@ class TestDispatchToLambdaSingleAttempt:
 
 
 class TestDispatchToCodeBuild:
+    @pytest.fixture(autouse=True)
+    def project_compute_type(self, monkeypatch):
+        monkeypatch.setenv("AWS_EXE_SYS_CODEBUILD_COMPUTE_TYPE", "BUILD_GENERAL1_SMALL")
+
     @patch("aws_exe_sys.init_job.dispatcher.uuid.uuid4")
     @patch("aws_exe_sys.init_job.dispatcher.boto3")
     def test_starts_standard_workflow(self, mock_boto3, mock_uuid4, monkeypatch):
@@ -209,7 +225,7 @@ class TestDispatchToCodeBuild:
 
     @patch("aws_exe_sys.init_job.dispatcher.uuid.uuid4")
     @patch("aws_exe_sys.init_job.dispatcher.boto3")
-    def test_passes_11_plain_string_fields_plus_derived_timeouts(self, mock_boto3, mock_uuid4, monkeypatch):
+    def test_passes_12_plain_string_fields_plus_derived_timeouts(self, mock_boto3, mock_uuid4, monkeypatch):
         state_machine_arn = "arn:aws:states:us-east-1:123:stateMachine:xe"
         monkeypatch.setenv("AWS_EXE_SYS_CODEBUILD_STATE_MACHINE_ARN", state_machine_arn)
         mock_uuid4.return_value.hex = "unique123"
@@ -237,6 +253,7 @@ class TestDispatchToCodeBuild:
             "callback_url",
             "callback_token",
             "execution_mode",
+            "compute_type",
             "build_timeout_minutes",
             "sfn_timeout_seconds",
         }
@@ -249,6 +266,48 @@ class TestDispatchToCodeBuild:
         # ceil(3600/60) + 3 margin minutes; 3600 + 300 queued + 300 margin.
         assert sent_payload["build_timeout_minutes"] == 63
         assert sent_payload["sfn_timeout_seconds"] == 4200
+
+    @patch("aws_exe_sys.init_job.dispatcher.uuid.uuid4")
+    @patch("aws_exe_sys.init_job.dispatcher.boto3")
+    def test_compute_type_present_rides_in_the_workflow_input(self, mock_boto3, mock_uuid4, monkeypatch):
+        monkeypatch.setenv("AWS_EXE_SYS_CODEBUILD_STATE_MACHINE_ARN", "arn:aws:states:us-east-1:123:stateMachine:xe")
+        mock_uuid4.return_value.hex = "unique123"
+        mock_client = MagicMock()
+        mock_client.start_execution.return_value = {"executionArn": "execution-arn"}
+        mock_boto3.client.return_value = mock_client
+
+        dispatch_to_codebuild(_valid_payload(execution_target="codebuild", compute_type="BUILD_GENERAL1_2XLARGE"))
+
+        sent_payload = json.loads(mock_client.start_execution.call_args.kwargs["input"])
+        assert sent_payload["compute_type"] == "BUILD_GENERAL1_2XLARGE"
+
+    @patch("aws_exe_sys.init_job.dispatcher.uuid.uuid4")
+    @patch("aws_exe_sys.init_job.dispatcher.boto3")
+    def test_compute_type_absent_takes_the_project_default(self, mock_boto3, mock_uuid4, monkeypatch):
+        # The state machine passes $.compute_type as ComputeTypeOverride on
+        # every StartBuild, and StartBuild rejects an empty value, so the
+        # dispatcher fills an absent field with the project's own compute type.
+        monkeypatch.setenv("AWS_EXE_SYS_CODEBUILD_STATE_MACHINE_ARN", "arn:aws:states:us-east-1:123:stateMachine:xe")
+        monkeypatch.setenv("AWS_EXE_SYS_CODEBUILD_COMPUTE_TYPE", "BUILD_GENERAL1_MEDIUM")
+        mock_uuid4.return_value.hex = "unique123"
+        mock_client = MagicMock()
+        mock_client.start_execution.return_value = {"executionArn": "execution-arn"}
+        mock_boto3.client.return_value = mock_client
+
+        dispatch_to_codebuild(_valid_payload(execution_target="codebuild"))
+
+        sent_payload = json.loads(mock_client.start_execution.call_args.kwargs["input"])
+        assert sent_payload["compute_type"] == "BUILD_GENERAL1_MEDIUM"
+
+    @patch("aws_exe_sys.init_job.dispatcher.boto3")
+    def test_missing_project_compute_type_configuration_fails_loudly(self, mock_boto3, monkeypatch):
+        monkeypatch.setenv("AWS_EXE_SYS_CODEBUILD_STATE_MACHINE_ARN", "arn:aws:states:us-east-1:123:stateMachine:xe")
+        monkeypatch.delenv("AWS_EXE_SYS_CODEBUILD_COMPUTE_TYPE", raising=False)
+
+        with pytest.raises(KeyError, match="AWS_EXE_SYS_CODEBUILD_COMPUTE_TYPE"):
+            dispatch_to_codebuild(_valid_payload(execution_target="codebuild"))
+
+        mock_boto3.client.return_value.start_execution.assert_not_called()
 
     @patch("aws_exe_sys.init_job.dispatcher.boto3")
     def test_missing_state_machine_configuration_fails_loudly(self, mock_boto3, monkeypatch):
@@ -276,6 +335,7 @@ class TestDispatchRouting:
     @patch("aws_exe_sys.init_job.dispatcher.boto3")
     def test_routes_to_codebuild_workflow(self, mock_boto3, monkeypatch):
         monkeypatch.setenv("AWS_EXE_SYS_CODEBUILD_STATE_MACHINE_ARN", "arn:aws:states:us-east-1:123:stateMachine:xe")
+        monkeypatch.setenv("AWS_EXE_SYS_CODEBUILD_COMPUTE_TYPE", "BUILD_GENERAL1_SMALL")
         mock_client = MagicMock()
         mock_client.start_execution.return_value = {"executionArn": "execution-arn"}
         mock_boto3.client.return_value = mock_client

@@ -19,6 +19,11 @@ _PAYLOAD_FIELDS = [
     "commands_b64",
     "done_endpoint",
     "execution_target",
+    "timeout_seconds",
+    "callback_url",
+    "callback_token",
+    "execution_mode",
+    "compute_type",
 ]
 
 

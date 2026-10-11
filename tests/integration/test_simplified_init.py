@@ -76,14 +76,16 @@ class TestInitValidPayloadDispatch:
         assert call_kwargs["InvocationType"] == "Event"
         sent = json.loads(call_kwargs["Payload"].decode())
         assert sent["trigger_id"] == "trg-int-001"
-        assert len(sent) == 11
+        assert len(sent) == 12
         assert sent["callback_url"] == ""
         assert sent["callback_token"] == ""
         assert sent["execution_mode"] == ""
+        assert sent["compute_type"] == ""
 
     def test_dispatch_to_codebuild(self, monkeypatch):
         state_machine_arn = "arn:aws:states:us-east-1:123:stateMachine:xe"
         monkeypatch.setenv("AWS_EXE_SYS_CODEBUILD_STATE_MACHINE_ARN", state_machine_arn)
+        monkeypatch.setenv("AWS_EXE_SYS_CODEBUILD_COMPUTE_TYPE", "BUILD_GENERAL1_SMALL")
 
         mock_s3 = MagicMock()
         mock_s3.head_object.return_value = {}
@@ -108,12 +110,13 @@ class TestInitValidPayloadDispatch:
         call_kwargs = mock_stepfunctions.start_execution.call_args.kwargs
         assert call_kwargs["stateMachineArn"] == state_machine_arn
         sent = json.loads(call_kwargs["input"])
-        # The SFN input is the 11 SimplePayload fields plus the two derived
+        # The SFN input is the 12 SimplePayload fields plus the two derived
         # timeout fields the state machine consumes.
         assert set(sent) == set(_valid_event()) | {
             "callback_url",
             "callback_token",
             "execution_mode",
+            "compute_type",
             "build_timeout_minutes",
             "sfn_timeout_seconds",
         }
@@ -122,6 +125,8 @@ class TestInitValidPayloadDispatch:
         )
         assert sent["callback_url"] == ""
         assert sent["callback_token"] == ""
+        # Absent on the wire: the dispatcher fills the project's own compute type.
+        assert sent["compute_type"] == "BUILD_GENERAL1_SMALL"
         assert isinstance(sent["build_timeout_minutes"], int)
         assert isinstance(sent["sfn_timeout_seconds"], int)
         mock_stepfunctions.start_build.assert_not_called()

@@ -10,6 +10,20 @@ import re
 _S3_URI_RE = re.compile(r"^s3://[a-zA-Z0-9.\-_]+/.+$")
 _VALID_SOPS_TYPES = frozenset({"ssm", "kms"})
 _VALID_EXECUTION_TARGETS = frozenset({"lambda", "codebuild"})
+# The CodeBuild ComputeType values valid for a LINUX_CONTAINER environment
+# (the engine's CodeBuild project). The BUILD_LAMBDA_* sizes need a
+# LINUX_LAMBDA_CONTAINER environment and ATTRIBUTE_BASED_COMPUTE /
+# CUSTOM_INSTANCE_TYPE need extra StartBuild fields, so none of them is
+# accepted here.
+_VALID_COMPUTE_TYPES = frozenset(
+    {
+        "BUILD_GENERAL1_SMALL",
+        "BUILD_GENERAL1_MEDIUM",
+        "BUILD_GENERAL1_LARGE",
+        "BUILD_GENERAL1_XLARGE",
+        "BUILD_GENERAL1_2XLARGE",
+    }
+)
 
 
 class PayloadValidationError(ValueError):
@@ -42,6 +56,11 @@ class SimplePayload:
                           engine ECR image. Dispatch-only discriminator: the
                           Step Functions Choice state reads it; the worker
                           never does. Requires execution_target "codebuild".
+        compute_type:     Optional. A CodeBuild ComputeType value, as AWS
+                          names it (BUILD_GENERAL1_SMALL ... BUILD_GENERAL1_2XLARGE).
+                          Rides to CodeBuild as the per-build ComputeTypeOverride.
+                          None (absent) = the CodeBuild project's fixed compute.
+                          The lambda target ignores it.
     """
 
     trigger_id: str
@@ -55,6 +74,7 @@ class SimplePayload:
     callback_url: str | None = None
     callback_token: str | None = None
     execution_mode: str | None = None
+    compute_type: str | None = None
 
     @staticmethod
     def _coerce_null(value: object) -> str | None:
@@ -106,6 +126,7 @@ class SimplePayload:
             callback_url=cls._coerce_null(data.get("callback_url")),
             callback_token=cls._coerce_null(data.get("callback_token")),
             execution_mode=cls._coerce_null(data.get("execution_mode")),
+            compute_type=cls._coerce_null(data.get("compute_type")),
         )
 
     def validate(self) -> None:
@@ -170,6 +191,11 @@ class SimplePayload:
             errors.append(
                 "execution_mode 'direct' requires execution_target 'codebuild', "
                 f"got execution_target {self.execution_target!r}"
+            )
+
+        if self.compute_type is not None and self.compute_type not in _VALID_COMPUTE_TYPES:
+            errors.append(
+                f"compute_type must be one of {sorted(_VALID_COMPUTE_TYPES)} or None, got {self.compute_type!r}"
             )
 
         if errors:
