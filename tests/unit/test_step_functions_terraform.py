@@ -21,6 +21,9 @@ _SENTINELS = {
     "local.direct_mode_buildspec": "sentinel-direct-mode-buildspec",
     "local.direct_mode_sops_url": "sentinel-direct-mode-sops-url",
     "local.direct_mode_age_url": "sentinel-direct-mode-age-url",
+    # The CodeBuild project's own compute type (main.tf local.codebuild_compute),
+    # the NormalizePayload default for an input that carries no compute_type.
+    "local.codebuild_compute": "BUILD_GENERAL1_SENTINEL",
 }
 
 
@@ -593,6 +596,77 @@ def test_rendered_normalize_pass_merges_defaults_for_all_twelve_keys(rendered_as
         "callback_url": "",
         "callback_token": "",
         "execution_mode": "",
-        "compute_type": "",
+        "compute_type": _SENTINELS["local.codebuild_compute"],
     }
     assert normalize["OutputPath"] == "$.merged"
+
+
+def _normalized_input(rendered_asl: dict, execution_input: dict) -> dict:
+    """Apply NormalizePayload to an execution input the way Step Functions does.
+
+    ``States.JsonMerge(defaults, $$.Execution.Input, false)`` is a shallow
+    merge in which the second argument (the execution input) wins for every
+    key it carries; a key the input lacks takes the default.
+    """
+    merged_expr = rendered_asl["States"]["NormalizePayload"]["Parameters"]["merged.$"]
+    defaults = json.loads(merged_expr.split("StringToJson('", 1)[1].split("')", 1)[0])
+    return {**defaults, **execution_input}
+
+
+def _compute_type_override(rendered_asl: dict, task_name: str, normalized: dict) -> object:
+    """Resolve the task's ``ComputeTypeOverride.$`` JSONPath against the normalized input."""
+    path = rendered_asl["States"][task_name]["Parameters"]["ComputeTypeOverride.$"]
+    assert path.startswith("$.") and "." not in path[2:], path
+    return normalized[path[2:]]
+
+
+# A direct start of the state machine, as openci-tf's apply and destroy lanes
+# do (no init-job Lambda): the eleven other payload fields and the two
+# dispatcher-derived timing inputs, and no compute_type at all.
+_DIRECT_START_INPUT_WITHOUT_COMPUTE_TYPE = {
+    "trigger_id": "t-direct",
+    "s3_package_uri": "s3://bucket/pkg.tar.gz",
+    "sops_type": "kms",
+    "sops_path": "",
+    "commands_b64": "ZWNobyBoaQ==",
+    "done_endpoint": "s3://bucket/done/t-direct.json",
+    "execution_target": "codebuild",
+    "timeout_seconds": "1200",
+    "callback_url": "",
+    "callback_token": "",
+    "execution_mode": "",
+    "build_timeout_minutes": 23,
+    "sfn_timeout_seconds": 1800,
+}
+
+
+@pytest.mark.parametrize("task_name", ["RunCodeBuild", "RunCodeBuildDirect"])
+def test_input_without_compute_type_yields_the_project_compute_type_on_start_build(
+    rendered_asl, task_name
+):
+    # The live failure (2026-10-12): openci-tf starts the state machine
+    # directly with no compute_type, and StartBuild answered "Invalid compute
+    # type provided" because ComputeTypeOverride resolved to the empty-string
+    # default. The state machine must supply the project's compute type.
+    execution_input = dict(_DIRECT_START_INPUT_WITHOUT_COMPUTE_TYPE)
+    assert "compute_type" not in execution_input
+
+    normalized = _normalized_input(rendered_asl, execution_input)
+
+    assert _compute_type_override(rendered_asl, task_name, normalized) == _SENTINELS[
+        "local.codebuild_compute"
+    ]
+    assert _compute_type_override(rendered_asl, task_name, normalized) != ""
+
+
+@pytest.mark.parametrize("task_name", ["RunCodeBuild", "RunCodeBuildDirect"])
+def test_input_with_compute_type_keeps_it_on_start_build(rendered_asl, task_name):
+    # The dispatcher path (and any direct caller that sends a value): the
+    # input's compute_type wins over the project default.
+    execution_input = dict(
+        _DIRECT_START_INPUT_WITHOUT_COMPUTE_TYPE, compute_type="BUILD_GENERAL1_LARGE"
+    )
+
+    normalized = _normalized_input(rendered_asl, execution_input)
+
+    assert _compute_type_override(rendered_asl, task_name, normalized) == "BUILD_GENERAL1_LARGE"
