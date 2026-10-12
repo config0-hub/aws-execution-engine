@@ -38,7 +38,7 @@ sync or async field in `SimplePayload`.
 | Path | Behavior |
 | --- | --- |
 | Inline | This is the default for almost every order. The publisher does the work inside the consumer's CLI subprocess and returns in the same pass. There is no engine payload, result marker, or exit-135 park. |
-| Engine-delegated, asynchronous | This is the default for delegated heavy or long-running work. The publisher invokes the engine and returns. The CLI exits `135`, the consumer parks the order, and the Go `run_publisher` role watches the S3 result marker. A `succeeded` marker brings a second consumer pass that finalizes the order; a `failed` marker fails it (see "Asynchronous delegated lifecycle"). |
+| Engine-delegated, asynchronous | This is the default for delegated heavy or long-running work. The publisher invokes the engine and returns. The CLI exits `135`, the consumer parks the order, and the Go `run_publisher` role watches the S3 result marker. Any result marker brings a second consumer pass, the finalize pass: a `succeeded` marker finalizes the order there; a `failed` marker is reported there, so the config0_cli handler records the partial create's unconfirmed index row before the consumer records the attempt failed (see "Asynchronous delegated lifecycle"). |
 | Engine-delegated, synchronous | An author can set `sync=True` for delegated work with a bounded duration. On the `lambda` target the publisher invokes the engine and polls the result marker until the result arrives, and the order returns in the same pass, without exit `135` or a `run_publisher` watch. The `codebuild` target always fires asynchronously, `sync` or not (`config0_publisher` `resource/tf_exec_shell_helper_main.py`); with `sync` set the CLI skips the `135` park, records the resource and returns while the CodeBuild build still runs (`config0_cli` `handlers/__init__.py`). No stack under `src/authoring` sets `sync` today. Unbounded mutations do not use this path because the consumer can run out of time before the engine finishes. |
 
 ## Engine wire boundary
@@ -103,6 +103,19 @@ These two are the only valid execution targets. The execution target is separate
 the package's secrets are decrypted; `sops_type="ssm"` remains supported and refers to
 the SOPS age key living in Systems Manager Parameter Store, which is a different thing
 from an execution target.
+
+For a terraform order the publisher's command list is: install the runtime, `init`
+with `-backend-config=use_lockfile=true` (every run locks, decision 27, Linear
+CON-75; a runtime below 1.10 is refused before staging), the known-dead unlock step,
+then the method's own commands (`plan`, `apply`, `destroy`, `refresh`). The unlock
+step reads the `.tflock` object beside the state under the sealed target session and
+runs `force-unlock` only when the fire pass found the previous attempt known dead in
+the execution slot (`timed_out` or `expired`) and the lock's `Created` falls inside
+that attempt's window; any other lock fails the step loud with the operator message.
+The window and verdict ride in the command as literals (`config0_publisher`
+`resource/terraform.py` `_get_tf_unlock`, `resource/aws_executor_status.py`
+`known_dead_attempt`; the rule is in the order queue contract, "Running an order a
+second time"). The engine sees only shell commands.
 
 The engine decodes `commands_b64` into an ordered list of shell commands. It runs the
 commands in order and stops at the first failure. Each step records combined standard
@@ -263,22 +276,29 @@ edges ("Running an order a second time"). The steps below keep to it.
    deadline, the order is requeued from phase 1 and the engine is fired again, bounded
    by the order's `retries`. Exhausting the retry budget is a hard failure.
 
-3. **Finalize.** When the result marker says `succeeded`, `run_publisher` requeues the
-   order for a second consumer pass, the finalize pass (`requeueForPhase2` stamps
-   `engine_phase=finalize`). The Python publisher reads the `ExecutionResult`, the
-   result is recorded through the Python resource path, and the order completes. A
-   `failed` marker on a generic engine-delegated order is recorded by `run_publisher`
-   itself, with no finalize pass (`RecordEngineDoneFailure`: status `failed`, the
-   engine's error as the reason, one retry spent). The row keeps
-   `engine_done_endpoint`, and the slot keeps the failed result. With budget left, the
-   gate promotes the order again. Its next pass is a fire pass, because the row carries
-   no `engine_phase=finalize`: it finds the old `failed` result, clears the slot, and
-   fires in the same pass. A fire pass consumes a `succeeded` result instead of firing,
-   and a finalize pass consumes either result (`config0_publisher`
+3. **Finalize.** When the result marker is present, `succeeded` or `failed`,
+   `run_publisher` requeues the order for a second consumer pass, the finalize pass
+   (`requeueForPhase2` stamps `engine_phase=finalize`; `config0-worker`
+   `internal/publisher/publisher.go` `pollEngineJobs`). `run_publisher` records no
+   failure itself (CON-80, 2026-10-12). On a `succeeded` result the Python publisher
+   reads the `ExecutionResult`, clears the slot, the result is recorded through the
+   Python resource path, and the order completes. On a `failed` result the finalize
+   pass reports the failure (the publisher exits 43, `run_execgroup` raises), the
+   `config0_cli` handler records the partial create's unconfirmed index row
+   (resource record contract), and the consumer records the attempt `failed` with the
+   engine's error as the reason, one retry spent (`RecordAttemptFailure`), stripping
+   the engine handshake from the row. The finalize pass does not clear a failed
+   result: the slot keeps `initiated`, `expire_at` and the result, because the next
+   fire pass reads the attempt's window and verdict from it for the known-dead unlock
+   (CON-75). With budget left, the gate promotes the order again. Its next pass is a
+   fire pass, because the row carries no `engine_phase=finalize`: it finds the old
+   `failed` result, clears the slot, and fires in the same pass. A fire pass consumes
+   a `succeeded` result instead of firing (`config0_publisher`
    `resource/aws_executor_decorator.py`; `cloud/aws/xe_engine.py` `is_finalize_pass`
-   reads `CONFIG0_ENGINE_PHASE`). A host order (`group/orders/host*`) is the exception:
-   any result requeues it for the finalize pass, so its cleanup runs before it goes
-   terminal (`config0-worker` `internal/publisher/publisher.go` `pollEngineJobs`).
+   reads `CONFIG0_ENGINE_PHASE`). A host order (`group/orders/host*`) follows the same
+   rule; its finalize branch (`config0_cli` `handlers/host_order.py`) deletes its
+   sealed payload and `DoneResult` marker on that pass. The expiry path (step 2, no
+   marker at `expire_at`) has no finalize pass and writes no index row.
 
 A host order fires through its own path. Its fire pass records the fire as `host_fire`
 on the row, then starts a Step Functions execution in the target account
