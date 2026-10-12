@@ -55,8 +55,14 @@ locals {
   # missing key in the execution input makes that reference throw
   # States.Runtime, which is uncatchable (a Catch on States.ALL does NOT catch
   # it), so FinalizeResult would never run and no done-marker would be written.
-  # NormalizePayload merges these empty-string defaults under the execution
-  # input so every referenced key always exists.
+  # NormalizePayload merges these defaults under the execution input so every
+  # referenced key always exists. Eleven default to the empty string;
+  # compute_type defaults to the project's own compute type because it is the
+  # per-build ComputeTypeOverride on both StartBuild tasks and StartBuild
+  # rejects an empty value. The state machine is a seam with two clients: the
+  # dispatcher (which always fills compute_type itself) and direct callers of
+  # the state machine (openci-tf's apply and destroy lanes) that send no
+  # compute_type - the default here is what makes a direct start work.
   codebuild_payload_defaults = {
     trigger_id       = ""
     s3_package_uri   = ""
@@ -69,7 +75,7 @@ locals {
     callback_url     = ""
     callback_token   = ""
     execution_mode   = ""
-    compute_type     = ""
+    compute_type     = local.codebuild_compute
   }
 
   # The one shared 12-entry EnvironmentVariablesOverride list, built from the
@@ -152,13 +158,16 @@ resource "aws_sfn_state_machine" "codebuild" {
     States = {
       NormalizePayload = {
         Type = "Pass"
-        # Defaults-normalization: shallow-merge empty-string defaults for all
-        # twelve payload keys UNDER the execution input (input wins), so every
+        # Defaults-normalization: shallow-merge the defaults for all twelve
+        # payload keys UNDER the execution input (input wins), so every
         # JSONPath the Choice and task states reference always resolves and
         # uncatchable States.Runtime templating failures cannot occur. The
-        # defaults do NOT mask real requirements: an empty trigger_id /
-        # done_endpoint etc. makes the worker fail loudly inside the container
-        # and write its failed marker - the correct fail-loud path.
+        # empty-string defaults do NOT mask real requirements: an empty
+        # trigger_id / done_endpoint etc. makes the worker fail loudly inside
+        # the container and write its failed marker - the correct fail-loud
+        # path. The one non-empty default, compute_type, supplies the
+        # project's compute type to a direct caller that sends none; a caller
+        # that sends a value keeps it.
         Parameters = {
           "merged.$" = "States.JsonMerge(States.StringToJson('${jsonencode(local.codebuild_payload_defaults)}'), $$.Execution.Input, false)"
         }
@@ -199,9 +208,11 @@ resource "aws_sfn_state_machine" "codebuild" {
           # minutes) by the dispatcher; the project's static build_timeout is
           # only a generous ceiling the override stays under.
           "TimeoutInMinutesOverride.$" = "$.build_timeout_minutes"
-          # Per-build compute size: the dispatcher always sets compute_type
-          # (the payload's value, else the project's own compute type), so
-          # this override is never empty.
+          # Per-build compute size: never empty. The dispatcher always sets
+          # compute_type (the payload's value, else the project's own compute
+          # type), and NormalizePayload defaults an absent compute_type to
+          # the project's compute type for a direct caller of this state
+          # machine.
           "ComputeTypeOverride.$"      = "$.compute_type"
           EnvironmentVariablesOverride = local.codebuild_env_overrides
         }

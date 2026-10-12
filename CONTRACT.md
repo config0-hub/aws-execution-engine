@@ -33,7 +33,7 @@ A caller submits the flat JSON payload below to `init_job` (Lambda, SNS, or dire
 | `callback_url` | Optional. An `http://` or `https://` URL. When set, the worker best-effort POSTs the terminal `ExecutionResult` here after writing the done-marker. |
 | `callback_token` | Optional. Sent as a bearer token (`Authorization: Bearer <token>`) on the callback POST. Requires `callback_url` to also be set. |
 | `execution_mode` | Optional (the 11th field). `null` (absent) = engine-image mode, the unchanged default: the CodeBuild project runs the ECR-baked engine image with `privileged_mode = false`. `"direct"` = the CodeBuild `StartBuild` request carries a static dispatcher-owned `BuildspecOverride` (install pinned `sops`/`age`, pull `engine.zip` from `ENGINE_ZIP_S3_BUCKET`/`ENGINE_ZIP_S3_KEY`, run `entrypoint.sh`) plus `ImageOverride = aws/codebuild/standard:7.0`, `PrivilegedModeOverride = true`, `ImagePullCredentialsTypeOverride = CODEBUILD`, plus the four direct-only env vars (`ENGINE_ZIP_S3_BUCKET`/`ENGINE_ZIP_S3_KEY`/`SOPS_URL`/`AGE_URL`) — all eight supplied only on that one Task's own `StartBuild` request, never on the default Task or the CodeBuild project resource. Validation rejects any other non-null value, and rejects `"direct"` combined with `execution_target="lambda"`. The worker inside the container still executes `commands_b64` exactly as in every other mode — direct mode selects delivery mechanics only, never a second command execution, and `execution_mode` itself is a dispatch-only field the worker never reads. |
-| `compute_type` | Optional (the 12th field). A CodeBuild `ComputeType` value, as AWS names it: one of `BUILD_GENERAL1_SMALL`, `BUILD_GENERAL1_MEDIUM`, `BUILD_GENERAL1_LARGE`, `BUILD_GENERAL1_XLARGE`, `BUILD_GENERAL1_2XLARGE` (the sizes CodeBuild accepts for a `LINUX_CONTAINER` environment). Validation rejects any other non-null value. On the `codebuild` target it becomes the per-build `ComputeTypeOverride` on the `StartBuild` request, in both `execution_mode` branches; `null` (absent) means the CodeBuild project's own compute type (the dispatcher fills it from `AWS_EXE_SYS_CODEBUILD_COMPUTE_TYPE`, the value Terraform set on the project), so the override is never empty. The `lambda` target ignores it. Dispatch-only: it rides to the container as the `COMPUTE_TYPE` env override like every other field, but no in-container code reads it. |
+| `compute_type` | Optional (the 12th field). A CodeBuild `ComputeType` value, as AWS names it: one of `BUILD_GENERAL1_SMALL`, `BUILD_GENERAL1_MEDIUM`, `BUILD_GENERAL1_LARGE`, `BUILD_GENERAL1_XLARGE`, `BUILD_GENERAL1_2XLARGE` (the sizes CodeBuild accepts for a `LINUX_CONTAINER` environment). Validation rejects any other non-null value. On the `codebuild` target it becomes the per-build `ComputeTypeOverride` on the `StartBuild` request, in both `execution_mode` branches; `null` (absent) means the CodeBuild project's own compute type, so the override is never empty: the dispatcher fills it from `AWS_EXE_SYS_CODEBUILD_COMPUTE_TYPE` (the value Terraform set on the project), and the state machine's own input normalization defaults an absent `compute_type` to that same project compute type, so a direct start of the state machine that sends no `compute_type` (openci-tf's apply and destroy lanes) gets the project default and one that sends a value keeps it. The `lambda` target ignores it. Dispatch-only: it rides to the container as the `COMPUTE_TYPE` env override like every other field, but no in-container code reads it. |
 
 Here, `sops_type="ssm"` means that the SOPS age key is stored in AWS Systems Manager Parameter Store. It is independent of the removed SSM execution target.
 
@@ -62,18 +62,21 @@ Acknowledgement on dispatch:
 
 - `lambda`: asynchronous invocation of `AWS_EXE_SYS_WORKER_LAMBDA`.
 - `codebuild`: asynchronous start of the Standard workflow in `AWS_EXE_SYS_CODEBUILD_STATE_MACHINE_ARN`.
-  The workflow first normalizes its input, merging empty-string defaults for any of the twelve payload
-  fields missing from the execution input, so a malformed dispatch still reaches the finalizer and
-  writes a terminal result instead of failing untemplatable.
+  The workflow first normalizes its input, merging defaults for any of the twelve payload fields
+  missing from the execution input (the empty string for eleven of them; the project's own compute
+  type for `compute_type`), so a malformed dispatch still reaches the finalizer and writes a terminal
+  result instead of failing untemplatable.
   The workflow starts the managed CodeBuild project with all twelve fields as plain-string CodeBuild
   environment overrides, waits for a terminal build state, and invokes the finalizer. The dispatcher derives
   two numeric workflow inputs from `timeout_seconds`: the per-build CodeBuild `TimeoutInMinutesOverride`
   (ceil to minutes plus a small margin) and the Step Functions state timeout (`timeout_seconds` plus the
   queued bound and a provisioning margin). The CodeBuild project's static `build_timeout` is only a generous
-  ceiling the per-build override stays under. The dispatcher also always sets `compute_type` in the workflow
-  input (the payload's value, else the project's own compute type), and the workflow passes it as the
-  per-build `ComputeTypeOverride`; the project's static `compute_type` is only the default the override
-  replaces.
+  ceiling the per-build override stays under. The workflow passes `compute_type` as the per-build
+  `ComputeTypeOverride` on both `StartBuild` tasks, and it is never empty: the dispatcher always sets it
+  in the workflow input (the payload's value, else the project's own compute type), and the workflow's
+  input normalization defaults an absent `compute_type` to the project's own compute type, so a caller
+  that starts the state machine directly without `compute_type` gets the project default. The project's
+  static `compute_type` is only the default the override replaces.
 
 The payload is passed as plain string values to each target. Successful `init_job` acknowledgement for
 CodeBuild means Step Functions accepted the execution; it does not mean the build completed.
