@@ -41,6 +41,12 @@ sync or async field in `SimplePayload`.
 | Engine-delegated, asynchronous | This is the default for delegated heavy or long-running work. The publisher invokes the engine and returns. The CLI exits `135`, the consumer parks the order, and the Go `run_publisher` role watches the S3 result marker. Any result marker brings a second consumer pass, the finalize pass: a `succeeded` marker finalizes the order there; a `failed` marker is reported there, so the config0_cli handler records the partial create's unconfirmed index row before the consumer records the attempt failed (see "Asynchronous delegated lifecycle"). |
 | Engine-delegated, synchronous | An author can set `sync=True` for delegated work with a bounded duration. On the `lambda` target the publisher invokes the engine and polls the result marker until the result arrives, and the order returns in the same pass, without exit `135` or a `run_publisher` watch. The `codebuild` target always fires asynchronously, `sync` or not (`config0_publisher` `resource/tf_exec_shell_helper_main.py`); with `sync` set the CLI skips the `135` park, records the resource and returns while the CodeBuild build still runs (`config0_cli` `handlers/__init__.py`). No stack under `src/authoring` sets `sync` today. Unbounded mutations do not use this path because the consumer can run out of time before the engine finishes. |
 
+An `agent/` order (`agent/server/submit`, `agent/evaluate`, `agent/ask`) takes none
+of the three engine paths and invokes no engine. The submit order's work runs on an
+EC2 server in the customer's account; its fire pass writes the brief and sends one
+message to the server's queue, then parks at `135` until saas-api writes the done
+marker ("Agent-order credentials", the exit-135 table).
+
 ## Engine wire boundary
 
 For delegated work, the publisher sends the `SimplePayload` to `config0-xe-init-job`:
@@ -212,6 +218,26 @@ sessions, deadlines or `TMP_BUCKET` fail before firing. The existing package,
 conditional done-marker PUT, park, polling and finalize mechanism is unchanged.
 No bucket, role, route, table or IAM policy is added for this path.
 
+## Agent-order credentials
+
+The submit order's work runs on the customer's server; `agent/evaluate` and
+`agent/ask` run on the consumer. The `agent/` roles receive no sealed package.
+`engineBoundRole` takes every role with the `agent/` prefix, so the consumer mints
+both sessions for it through `injectOrderCreds`, the two-session layout host orders
+take: the hub `assume_engine` session as the bare `AWS_*` and the target
+`assume_target` session as `CONFIG0_TARGET_AWS_*` (`config0-worker`
+`internal/consumer/executor.go`). `agent/` is not an `EngineDelegatingRole`, so no
+engine package is sealed, and the target-bare branch that `gitops/tenant/execute` and
+`project/delete` take is not used. `hostOrder` does not change, so the host-only
+`CONFIG0_ENGINE_CREDS_EXPIRE_AT` is not set.
+
+The submit order's fire pass uses `CONFIG0_TARGET_AWS_*` to write the brief to the
+customer's artifact bucket and to send one message to the server's queue; the
+evaluation order reads that bucket with it; the ask order uses neither session. An
+`agent/*` role takes `scriptForOrder`'s default branch, `config0` plus the order's
+`pos_args`. The 3600-second refusal in `targetCredsDuration` is unchanged: the submit
+order's row timeout is 900, so the session it asks for is 1200 seconds.
+
 ## HARD RULE: one plumbing, no alternates
 
 The engine is a GENERIC automation engine, not an IaC runner. EVERY delegated execution —
@@ -321,7 +347,7 @@ Exit `135` parks the order at `phase2complete`. What the consumer stores, and wh
 
 | The CLI printed | The consumer parks | `run_publisher` |
 | --- | --- | --- |
-| `CONFIG0_ENGINE_DONE_ENDPOINT=<uri>`, with `CONFIG0_ENGINE_EXPIRE_AT=<epoch second>` on the next line (`config0_cli` `handlers/__init__.py` `_emit_done_endpoint`, from the phases JSON `build_expire_at`) | `engine_done_endpoint` plus `expire_at`, the done-marker watch deadline: the publisher's own tracking deadline as the CLI printed it. Only a `135` that carries the endpoint line without the deadline line (a host order, `config0_cli` `handlers/host_order.py`) parks the worker's own `T + 120` instead (`engineWatchTimeout`). | Reads the S3 result marker: steps 2 and 3 above. |
+| `CONFIG0_ENGINE_DONE_ENDPOINT=<uri>`, with `CONFIG0_ENGINE_EXPIRE_AT=<epoch second>` on the next line (`config0_cli` `handlers/__init__.py` `_emit_done_endpoint`, from the phases JSON `build_expire_at`) | `engine_done_endpoint` plus `expire_at`, the done-marker watch deadline: the publisher's own tracking deadline as the CLI printed it. Only a `135` that carries the endpoint line without the deadline line (a host order, `config0_cli` `handlers/host_order.py`) parks the worker's own `T + 120` instead (`engineWatchTimeout`). An `agent/server/submit` or `agent/ask` order prints both lines with no engine: the deadline is the fire pass plus `phase2complete_timeout` (submit, plus a margin for the stop sequence and the envelope) or `answer_wait_seconds` (ask), never the order's `timeout`. | Reads the S3 result marker: steps 2 and 3 above. For a submit or ask order saas-api writes the marker, and the order is emitted with `retries=1`, so a passed `expire_at` settles it `timed_out`. |
 | `CONFIG0_APPROVAL_WATCH=<watch>` (only a `gitops/tenant/execute` order; `config0_cli` `handlers/gitops.py`) | The approval watch, with no `engine_done_endpoint` and `expire_at` set to `0`, which means no deadline. No engine execution is involved. | Asks QHost for the decision on the run's `pipeline_run` record. A delivered decision, or a head change recorded for the watched checkpoint, requeues the order for the second pass. An absent decision leaves it parked. |
 | `CONFIG0_REGISTRY_WATCH=<watch>` (only a `gitops/tenant/execute` order running an `apply` or `destroy`; `config0_cli` `handlers/gitops.py`, raised by `gitops/pr_machine.py` `RegistryWatchRequired` once the openci run id is on the `pipeline_run` record; CON-81, decision 2026-10-12) | The registry watch (`run_record_id`, `openci_run_id`, `run_registry_table_name`), with no `engine_done_endpoint`, and `expire_at` set to the worker's own `T + 120` (`engineWatchTimeout`): the openci run is the delegated work and the order's timeout is its deadline. No engine execution is involved. | Reads the run's row in openci-tf's run registry (`pk=run#<openci_run_id>`, `sk=meta`, one consistent `GetItem` under the `assume_engine` session; `internal/publisher/engine_poller.go` `CheckRegistry`). Any terminal status (`succeeded`, `failed`, `infrastructure_error`, `skipped`) requeues the order for the second pass, which resumes the PR machine from `data.mutation_state` and fails loud on a failed run. A non-terminal status leaves it parked until `expire_at`; past it, the expiry path (step 2 above) returns the order to phase 1, whose pass finds the recorded run still not terminal and fails loud without starting a second openci run. A decided stage drains this park like an approval park. |
 | Neither line | No watch, and no deadline. | Skips the order on every poll. Only a shellout script or a `sh -c` role command that itself exits `135` reaches this row; a `gitops/tenant/execute` order that does fails instead, with exit code `1`. |
@@ -332,6 +358,18 @@ An order's timeout `T` is the one number: the order's `timeout` param, which
 `config0_publisher` `resource/manage_init.py` `_set_build_timeout` reads as the engine
 `TIMEOUT` (default 600). Our code sets every other clock as `T` plus a buffer at the
 moment it makes the call. AWS limits are only an upper bound our clocks never reach.
+
+The submit order (`agent/server/submit`) carries a second number. Its `timeout=900`
+stays the pass, the target-credential session input and the inserter's check; its
+park deadline is `phase2complete_timeout`, a stack argument the stack puts in the
+order's inputted values (`add_jiffy_cli(overide_values=...)`). The handler reads it
+from `CONFIG0_PARAMS.inputted`, never from `params.timeout`, `TIMEOUT` or
+`BUILD_TIMEOUT`, and the requeue strip (`StripEngineHandshake`) keeps it. The fire
+pass turns it into one absolute deadline, writes it into the brief, and prints
+`CONFIG0_ENGINE_EXPIRE_AT` as that deadline plus a margin; the run publisher stops
+waiting there, and the runner daemon on the server stops the submit order's work at
+the deadline, even after a wait in the server's queue. The ask order (`agent/ask`)
+reads `answer_wait_seconds` from its inputted the same way.
 
 | Clock | Value | Who sets it, where |
 | --- | --- | --- |
