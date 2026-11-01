@@ -11,6 +11,7 @@ permissions:
 
 env:
   IMAGE: ghcr.io/config0-hub/aws-execution-engine
+  BUILDX_NO_DEFAULT_ATTESTATIONS: "1"
 
 concurrency:
   group: image-publish
@@ -39,8 +40,10 @@ jobs:
         id: tag
         run: echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
+      # Lambda accepts only a single image manifest; buildx attestations make the
+      # pushed tag an image index with an attestation child, which Lambda rejects.
       - name: Build image
-        run: docker build -f docker/Dockerfile -t "$IMAGE:${{ steps.tag.outputs.sha }}" .
+        run: docker build --provenance=false --sbom=false --platform linux/amd64 -f docker/Dockerfile -t "$IMAGE:${{ steps.tag.outputs.sha }}" .
 
       - name: Image smoke test
         run: |
