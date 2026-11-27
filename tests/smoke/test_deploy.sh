@@ -6,11 +6,11 @@ FAILED=0
 
 pass() {
 	echo "PASS: $1"
-	((PASSED++))
+	PASSED=$((PASSED + 1))
 }
 fail() {
 	echo "FAIL: $1"
-	((FAILED++))
+	FAILED=$((FAILED + 1))
 }
 
 for var in PREFIX AWS_REGION; do
